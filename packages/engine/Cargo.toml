@@ -1,0 +1,51 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "beatemup"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror = "2.0.17"
+serde.workspace = true
+serde-saphyr.workspace = true
+tracing.workspace = true
+
+bevy = "0.18"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+expect_used = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+panic = "warn"
+pedantic = { level = "warn", priority = -1 }
+todo = "warn"
+unwrap_used = "warn"
+# Bevy の system シグネチャ (Res<T>, Query<...> を値で受ける) と相性が悪い
+needless_pass_by_value = "allow"
+# engine 起動経路は将来 ? で bubble up したいため Result を返す形を維持
+unnecessary_wraps = "allow"
+# 画像ピクセル座標 (i32/u32) を Bevy の Vec3 (f32) に乗せる場面が頻発する。
+# 実値は < ~100K で f32 mantissa 23bit 内に収まり精度損失は事実上ゼロ
+cast_precision_loss = "allow"
+# Bevy の Query<...> は filter / tuple 合成で型がネストしがち。
+# 個別 allow を散らすより crate 全体で許容する
+type_complexity = "allow"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# 早期スキャフォールディング段階: API 表面が UI 配線前に追加されるため許容
+dead_code = "allow"
+unused_imports = "allow"

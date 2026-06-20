@@ -1,0 +1,8 @@
+name: thumbnail
+number: 2
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90

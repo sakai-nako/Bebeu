@@ -1,0 +1,18 @@
+name: walk
+number: 1
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+- index: 1
+  path: 002.png
+  pivot_point:
+  - 24
+  - 90
+- index: 2
+  path: 003.png
+  pivot_point:
+  - 24
+  - 90

@@ -1,0 +1,20 @@
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Dioxus desktop build artifacts
+dist/
+.dioxus/
+
+# Tailwind CLI 生成物 (editor-desktop)。npm script で生成、commit しない。
+packages/editor-desktop/assets/tailwind.css
+
+# node_modules (editor 用 tailwind/daisyui, docsite 用 VitePress)
+node_modules/
+
+# Editor/IDE
+.idea/
+*.iml
+
+# private な workspace_dir。Public 版では sample-projects のみ tracking する。
+/runtime/

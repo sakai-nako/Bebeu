@@ -1,0 +1,38 @@
+[package]
+name = "editor-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+dioxus = { version = "0.7.9", features = ["desktop", "router"] }
+dirs = "6.0.0"
+http = "1"
+rfd = "0.17.2"
+serde.workspace = true
+serde-saphyr.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+expect_used = "allow"
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+panic = "warn"
+pedantic = { level = "warn", priority = -1 }
+todo = "warn"
+unwrap_used = "warn"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# 早期スキャフォールディング段階: API 表面が UI 配線前に追加されるため許容
+dead_code = "allow"
+unused_imports = "allow"

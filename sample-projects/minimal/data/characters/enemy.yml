@@ -1,0 +1,15 @@
+name: enemy
+thumbnail_path: sprite-groups/thumbnail/sprites/001.png
+hp: 80
+depth: 16
+physics:
+  gravity: 800.0
+  jump_velocity_y: 200.0
+  knockback_threshold: 100
+  knockback_resistance: 0.0
+  max_bounce_count: 1
+  bounce_dampening: 0.5
+  ground_friction: 600.0
+  hit_recovery_ms: 1500
+  lie_down_duration_ms: 800
+  rise_duration_ms: 300

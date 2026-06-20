@@ -1,0 +1,9 @@
+resolution:
+  width: 384
+  height: 216
+players:
+- hero
+opponents:
+- enemy
+levels:
+- training

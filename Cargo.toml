@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "packages/engine",
+    "packages/editor-desktop",
+    "tools/asset-gen",
+]
+
+# editor-desktop と engine の両方で使う依存だけをここに集約する。
+# 片方の crate でしか使わない依存 (dioxus / bevy 等) は各 crate の Cargo.toml で直接管理する。
+[workspace.dependencies]
+anyhow = "1.0.102"
+serde = { version = "1.0.228", features = ["derive"] }
+serde-saphyr = "0.0.24"
+tempfile = "3.27.0"
+tracing = "0.1.44"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,8 @@
+# Public 版では workspace_dir は engine からは参照されない。
+# BEATEMUP_RUNTIME_DIR 環境変数 (justfile の engine-run-sample が設定) で
+# sample-projects/minimal を渡す。
+
+# 表示ウィンドウのピクセルサイズ。省略時は 1280x720。
+window:
+  width: 1280
+  height: 720

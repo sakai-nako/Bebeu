@@ -1,0 +1,20 @@
+name: training
+base: base.png
+areas:
+- near_z: 215
+  far_z: 130
+  near_min_x: 0
+  near_max_x: 640
+  far_min_x: 0
+  far_max_x: 640
+camera_start_x: 0
+camera_start_y: 0
+player_spawn_x: 64
+player_spawn_z: 200
+player_respawn_y: 0
+opponent_triggers:
+- character_name: enemy
+  trigger_x: 200
+  spawn_x: 380
+  spawn_y: 0
+  spawn_z: 200

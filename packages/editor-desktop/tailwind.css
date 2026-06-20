@@ -1,0 +1,7 @@
+@source "./src/**/*.{rs,html,css}";
+@import "tailwindcss";
+@import "./assets/theme.css";
+
+@plugin "daisyui" {
+    themes: emerald --default, dark;
+}

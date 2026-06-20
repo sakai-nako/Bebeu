@@ -1,0 +1,57 @@
+@theme {
+    --font-sans: "Inter", sans-serif;
+}
+
+/* Hide native number input spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+input[type="number"] {
+    -moz-appearance: textfield;
+}
+
+/* daisyUI の `.collapse` は `isolation: isolate` で stacking context を作るため、
+   その内側の `<dialog class="modal">` (z-index: 999, position: fixed) が collapse 内に
+   閉じ込められ、隣の collapse に重ねられて隠れてしまう。Modal を画面全体に正しく
+   重ねるため、stacking context を作らないように打ち消す。 */
+.collapse {
+    isolation: auto;
+}
+
+/* Utility class for checkerboard canvas background */
+.checkerboard-bg {
+    background-image: conic-gradient(#e5e5e5 25%,
+            #ffffff 25%,
+            #ffffff 50%,
+            #e5e5e5 50%,
+            #e5e5e5 75%,
+            #ffffff 75%);
+    background-size: 20px 20px;
+}
+
+/* 自動消滅するトーストのフェードアウト。最初の 75% は不透明 0.92 を保ち、残り 25% で
+   透明 + 右にスライドしながら消える。animationend で Rust 側の queue から dismiss する。
+   ホバー中は再生を止めて読みやすくする。 */
+@keyframes toast-auto-dismiss {
+    0%,
+    75% {
+        opacity: 0.92;
+        transform: translateX(0);
+    }
+
+    100% {
+        opacity: 0;
+        transform: translateX(20px);
+    }
+}
+
+.toast-auto-dismiss {
+    animation: toast-auto-dismiss 4s forwards;
+}
+
+.toast-auto-dismiss:hover {
+    animation-play-state: paused;
+}

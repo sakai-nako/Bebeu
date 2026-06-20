@@ -1,0 +1,7 @@
+# cargo-nextest の設定。
+# 'ci' profile は自宅 local-infra の quality-agent が信頼性 (テスト合格率) 評価に
+# 使う JUnit レポートを出力する (game-eval-tools の run-eval.sh が NEXTEST_PROFILE=ci
+# で実行 → target/nextest/ci/junit.xml)。ローカルでも `cargo nextest run --profile ci`
+# で同じレポートを得られる。
+[profile.ci.junit]
+path = "junit.xml"
