@@ -1,5 +1,7 @@
 # Bebeu
 
+*The name is **BE**vy + **B**eat **E**m **U**p.*
+
 A Rust beat-em-up engine (Bevy) + visual editor (Dioxus desktop), distributed as a workspace.
 
 For now, this is a personal hobby project, shared in the open in case anyone finds it useful — no general-framework ambitions and no support SLA. Direction may evolve as the project matures.
@@ -39,17 +41,15 @@ docsite/           # VitePress documentation site
 ## Run the sample project
 
 ```
-# generate placeholder sprites and the level base PNG
-just gen-sample
-
-# launch the engine with the sample's `main` project loaded
 just engine-run-sample --project main
 ```
 
 `engine-run-sample` sets `BEATEMUP_RUNTIME_DIR` to `sample-projects/minimal`,
 so the engine reads its character / level / project YAML from that tree. The
-title scene that opens is intentionally empty — press **Enter** or **Space**
-to advance to the battle scene.
+placeholder PNGs are committed under that tree, so a fresh clone runs without
+any pre-step. (`just gen-sample` regenerates them from `tools/asset-gen` if
+you tweak the generator.) The title scene that opens is intentionally empty —
+press **Enter** or **Space** to advance to the battle scene.
 
 ## Run the editor
 
@@ -103,6 +103,8 @@ Everything under `sample-projects/` (including the generated PNGs from
 
 # 日本語
 
+*名前は **BE**vy + **B**eat **E**m **U**p から。*
+
 Rust 製のベルトスクロールアクション engine (Bevy) と、それ専用のビジュアル editor (Dioxus desktop) を 1 つの cargo workspace にまとめたものです。
 
 今のところは個人の趣味プロジェクトを公開しているだけで、汎用 framework を目指していたりサポートを保証しているわけではありません。今後の発展次第で位置づけは変わるかも。
@@ -128,11 +130,10 @@ Rust 製のベルトスクロールアクション engine (Bevy) と、それ専
 ## サンプル起動
 
 ```
-just gen-sample                          # プレースホルダー PNG を生成
-just engine-run-sample --project main    # sample の main project をロードして起動
+just engine-run-sample --project main
 ```
 
-`engine-run-sample` は `BEATEMUP_RUNTIME_DIR=sample-projects/minimal` を渡して起動するため、engine はそのツリーから YAML を読みます。最初に出る title scene は空っぽなので、**Enter** か **Space** を押して battle scene に進んでください。
+`engine-run-sample` は `BEATEMUP_RUNTIME_DIR=sample-projects/minimal` を渡して起動するため、engine はそのツリーから YAML を読みます。プレースホルダー PNG は `sample-projects/minimal/` 配下に commit 済みなので、clone 直後に追加手順なしで動きます (`tools/asset-gen` を弄った場合は `just gen-sample` で再生成)。最初に出る title scene は空っぽなので、**Enter** か **Space** を押して battle scene に進んでください。
 
 ## エディタ起動
 
