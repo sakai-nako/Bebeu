@@ -5,6 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const CONFIG_FILE_NAME: &str = "bebeu-editor.yml";
+const WORKSPACE_DIR_ENV: &str = "BEATEMUP_EDITOR_WORKSPACE_DIR";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -17,6 +18,14 @@ impl Config {
     }
 
     pub fn load() -> Result<Self> {
+        // env var が立っていれば yml も dialog も介さず最優先で使う
+        // (sample-projects/minimal を向けた dev レシピ等で利用)。
+        if let Some(dir) = std::env::var_os(WORKSPACE_DIR_ENV) {
+            return Ok(Self {
+                workspace_dir: PathBuf::from(dir),
+            });
+        }
+
         let mut config_path = std::env::current_exe()?
             .parent()
             .ok_or(anyhow::anyhow!("カレントディレクトリの取得に失敗。"))?

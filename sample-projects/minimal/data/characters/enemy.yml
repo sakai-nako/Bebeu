@@ -1,6 +1,6 @@
 name: enemy
 thumbnail_path: sprite-groups/thumbnail/sprites/001.png
-hp: 80
+hp: 100
 depth: 16
 physics:
   gravity: 800.0

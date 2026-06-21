@@ -422,8 +422,8 @@ fn BoxEditor(
                 }
             }
             if is_attack {
-                // Attack の場合は AttackBoxMeta (Damage / KnockbackDamage / HitstunExtra /
-                // Knockback Vec3) 編集を併設する。全 0 のときは None として保存される。
+                // Attack の場合は AttackBoxMeta (Damage / KnockbackDamage / Knockback Vec3 /
+                // HitStop) 編集を併設する。全 0 のときは None として保存される。
                 div { class: "pt-2 border-t border-base-300",
                     h4 { class: "text-xs font-semibold uppercase tracking-wide text-base-content/70 mb-1",
                         "Attack Meta"

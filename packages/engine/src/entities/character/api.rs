@@ -168,7 +168,11 @@ mod tests {
     #[test]
     fn character_broken_yaml_is_error() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = write_yaml(dir.path(), "broken", "this is :: not a valid yaml :: at all\n")?;
+        let path = write_yaml(
+            dir.path(),
+            "broken",
+            "this is :: not a valid yaml :: at all\n",
+        )?;
         assert!(Character::load_from_file(&path, "broken").is_err());
         Ok(())
     }
@@ -185,20 +189,24 @@ mod tests {
             "name: MooR_01\nhp: 500\ndepth: 16\n",
         )?;
         write_file(
-            &runtime.character_dir("MooR_01").join("sprite-groups/walk.yml"),
+            &runtime
+                .character_dir("MooR_01")
+                .join("sprite-groups/walk.yml"),
             "name: walk\nnumber: 1\nsprites:\n- index: 0\n  path: 001.png\n  pivot_point:\n  - 23\n  - 93\n",
         )?;
         write_file(
-            &runtime.character_dir("MooR_01").join("sprite-groups/idle.yml"),
+            &runtime
+                .character_dir("MooR_01")
+                .join("sprite-groups/idle.yml"),
             "name: idle\nnumber: 0\nsprites:\n- index: 0\n  path: 001.png\n  pivot_point:\n  - 24\n  - 93\n",
         )?;
         write_file(
             &runtime.character_dir("MooR_01").join("animations/walk.yml"),
-            "name: walk\nrole: walk\nis_loop: true\nframes:\n- index: 0\n  duration: 120\n  layers:\n  - index: 0\n    sprite_group_number: 1\n    sprite_index: 0\n",
+            "name: walk\nrole: walk\nis_loop: true\nframes:\n- index: 0\n  ticks: 7\n  layers:\n  - index: 0\n    sprite_group_number: 1\n    sprite_index: 0\n",
         )?;
         write_file(
             &runtime.character_dir("MooR_01").join("animations/idle.yml"),
-            "name: idle\nrole: idle\nis_loop: true\nframes:\n- index: 0\n  duration: 50\n  layers:\n  - index: 0\n    sprite_group_number: 0\n    sprite_index: 0\n",
+            "name: idle\nrole: idle\nis_loop: true\nframes:\n- index: 0\n  ticks: 3\n  layers:\n  - index: 0\n    sprite_group_number: 0\n    sprite_index: 0\n",
         )?;
 
         let character = Character::load_directory(&runtime, "MooR_01")?;
@@ -209,7 +217,11 @@ mod tests {
         assert!(character.sprite_groups.contains_key(&1));
         assert_eq!(character.sprite_groups[&1].sprites[0].pivot_point, [23, 93]);
         assert_eq!(character.animations.len(), 2);
-        let role_names: Vec<&str> = character.animations.iter().map(|a| a.name.as_str()).collect();
+        let role_names: Vec<&str> = character
+            .animations
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
         assert!(role_names.contains(&"walk"));
         assert!(role_names.contains(&"idle"));
         Ok(())
@@ -232,11 +244,15 @@ mod tests {
         let runtime = RuntimePaths::from_root(dir.path().to_path_buf());
         write_file(&runtime.character_file("MooR_01"), "name: MooR_01\n")?;
         write_file(
-            &runtime.character_dir("MooR_01").join("sprite-groups/walk.yml"),
+            &runtime
+                .character_dir("MooR_01")
+                .join("sprite-groups/walk.yml"),
             "name: walk\nnumber: 1\nsprites: []\n",
         )?;
         write_file(
-            &runtime.character_dir("MooR_01").join("sprite-groups/README.md"),
+            &runtime
+                .character_dir("MooR_01")
+                .join("sprite-groups/README.md"),
             "ignore me\n",
         )?;
         let character = Character::load_directory(&runtime, "MooR_01")?;
@@ -249,7 +265,7 @@ mod tests {
     #[test]
     fn animation_load_round_trip_from_walk_yml_shape() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let yaml = "name: walk\nrole: walk\nvariant: 0\nis_loop: true\nloop_start_index: 0\nframes:\n- index: 0\n  duration: 120\n  flip: null\n  pivot_point_offset: null\n  body_box_overrides: null\n  attack_box_overrides: null\n  layers:\n  - index: 0\n    sprite_group_number: 1\n    sprite_index: 0\n    transparency: 1.0\n    flip: null\n    pivot_point_offset: null\n- index: 1\n  duration: 120\n  flip: null\n  pivot_point_offset: null\n  body_box_overrides: null\n  attack_box_overrides: null\n  layers:\n  - index: 0\n    sprite_group_number: 1\n    sprite_index: 1\n    transparency: 1.0\n    flip: null\n    pivot_point_offset: null\n";
+        let yaml = "name: walk\nrole: walk\nvariant: 0\nis_loop: true\nloop_start_index: 0\nframes:\n- index: 0\n  ticks: 7\n  flip: null\n  pivot_point_offset: null\n  body_box_overrides: null\n  attack_box_overrides: null\n  layers:\n  - index: 0\n    sprite_group_number: 1\n    sprite_index: 0\n    transparency: 1.0\n    flip: null\n    pivot_point_offset: null\n- index: 1\n  ticks: 7\n  flip: null\n  pivot_point_offset: null\n  body_box_overrides: null\n  attack_box_overrides: null\n  layers:\n  - index: 0\n    sprite_group_number: 1\n    sprite_index: 1\n    transparency: 1.0\n    flip: null\n    pivot_point_offset: null\n";
         let path = write_yaml(dir.path(), "walk", yaml)?;
         let anim = Animation::load_from_file(&path, "walk")?;
         assert_eq!(anim.name, "walk");
@@ -258,7 +274,7 @@ mod tests {
         assert!(anim.is_loop);
         assert_eq!(anim.loop_start_index, 0);
         assert_eq!(anim.frames.len(), 2);
-        assert_eq!(anim.frames[0].duration, 120);
+        assert_eq!(anim.frames[0].ticks, 7);
         assert_eq!(anim.frames[0].layers.len(), 1);
         assert_eq!(anim.frames[0].layers[0].sprite_group_number, 1);
         assert_eq!(anim.frames[0].layers[0].sprite_index, 0);
@@ -270,7 +286,7 @@ mod tests {
     #[test]
     fn animation_role_idle_round_trips() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let yaml = "role: idle\nis_loop: true\nframes:\n- index: 0\n  duration: 50\n  layers: []\n";
+        let yaml = "role: idle\nis_loop: true\nframes:\n- index: 0\n  ticks: 3\n  layers: []\n";
         let path = write_yaml(dir.path(), "idle", yaml)?;
         let anim = Animation::load_from_file(&path, "idle")?;
         assert_eq!(anim.role, Role::Idle);
@@ -311,7 +327,11 @@ mod tests {
     #[test]
     fn animation_broken_yaml_is_error() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = write_yaml(dir.path(), "broken", "this is :: not a valid yaml :: at all\n")?;
+        let path = write_yaml(
+            dir.path(),
+            "broken",
+            "this is :: not a valid yaml :: at all\n",
+        )?;
         assert!(Animation::load_from_file(&path, "broken").is_err());
         Ok(())
     }
@@ -356,7 +376,11 @@ mod tests {
     #[test]
     fn sprite_group_broken_yaml_is_error() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = write_yaml(dir.path(), "broken", "this is :: not a valid yaml :: at all\n")?;
+        let path = write_yaml(
+            dir.path(),
+            "broken",
+            "this is :: not a valid yaml :: at all\n",
+        )?;
         assert!(SpriteGroup::load_from_file(&path, "broken").is_err());
         Ok(())
     }

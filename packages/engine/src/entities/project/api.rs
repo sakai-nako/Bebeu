@@ -37,7 +37,13 @@ mod tests {
         let path = write_yaml(dir.path(), "main", yaml)?;
         let project = Project::load_from_file(&path, "main")?;
         assert_eq!(project.name, "main");
-        assert_eq!(project.resolution, Resolution { width: 384, height: 216 });
+        assert_eq!(
+            project.resolution,
+            Resolution {
+                width: 384,
+                height: 216
+            }
+        );
         assert_eq!(project.players, vec!["MooR_01"]);
         assert_eq!(project.opponents, vec!["MooR_01"]);
         assert_eq!(project.levels, vec!["ct"]);
@@ -80,7 +86,11 @@ mod tests {
     fn broken_yaml_is_error() -> Result<()> {
         // Project は一次データなので fail-soft しない (testing.md L81)。
         let dir = tempfile::tempdir()?;
-        let path = write_yaml(dir.path(), "broken", "this is :: not a valid yaml :: at all\n")?;
+        let path = write_yaml(
+            dir.path(),
+            "broken",
+            "this is :: not a valid yaml :: at all\n",
+        )?;
         assert!(Project::load_from_file(&path, "broken").is_err());
         Ok(())
     }

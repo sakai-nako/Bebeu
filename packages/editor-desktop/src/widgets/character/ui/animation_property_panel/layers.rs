@@ -332,7 +332,17 @@ pub(super) fn SelectedLayerEditor(
                     value: "{group_value}",
                     onchange: on_group,
                     for group in character.sprite_groups.iter() {
-                        option { value: "{group.number}", "{group.name} (#{group.number})" }
+                        // option 側にも `selected:` を必ず付ける。Dioxus desktop の webview では
+                        // `<select value="...">` だけだと controlled state がブラウザ DOM と
+                        // ずれ、ユーザの選択が revert されて onchange が「現在値と同じ値」で
+                        // 発火 → on_group の早期 return で握り潰される (= 反映されない / dirty に
+                        // ならない) という症状になる。role_section が正常動作しているのと
+                        // 同じ理由で `selected:` を併用する。
+                        option {
+                            value: "{group.number}",
+                            selected: group.number == layer.sprite_group_number,
+                            "{group.name} (#{group.number})"
+                        }
                     }
                 }
                 label { class: "text-xs", "Sprite Index" }
@@ -345,11 +355,17 @@ pub(super) fn SelectedLayerEditor(
                             option { value: "0", disabled: true, "（sprites 無し）" }
                         } else {
                             for sprite in group.sprites.iter() {
-                                option { value: "{sprite.index}", "{sprite.index}: {sprite.path}" }
+                                option {
+                                    value: "{sprite.index}",
+                                    selected: sprite.index == layer.sprite_index,
+                                    "{sprite.index}: {sprite.path}"
+                                }
                             }
                         }
                     } else {
-                        option { value: "{layer.sprite_index}",
+                        option {
+                            value: "{layer.sprite_index}",
+                            selected: true,
                             "現在: {layer.sprite_index} (group 不明)"
                         }
                     }

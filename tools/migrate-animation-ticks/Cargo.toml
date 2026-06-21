@@ -1,0 +1,19 @@
+[package]
+name = "migrate-animation-ticks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "One-shot migration: rewrite animation YAML `duration: <ms>` to `ticks: <60Hz tick count>`."
+
+[[bin]]
+name = "migrate-animation-ticks"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

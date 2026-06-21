@@ -70,7 +70,7 @@ pub fn AnimationPropertyPanel(
                         draft,
                         history,
                         frame_index,
-                        duration: frame.duration,
+                        ticks: frame.ticks,
                     }
                 }
 

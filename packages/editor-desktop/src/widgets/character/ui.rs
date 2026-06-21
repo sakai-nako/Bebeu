@@ -19,7 +19,7 @@ mod canvas_common;
 // HitBox 編集 input の共通コンポーネント
 mod hitbox_inputs;
 
-// AttackBox.meta (Damage / KnockbackDamage / HitstunExtra / Knockback Vec3) の共通入力
+// AttackBox.meta (Damage / KnockbackDamage / Knockback Vec3 / HitStop) の共通入力
 mod attack_meta_inputs;
 
 // Sprite 編集 (Specialized Editor View)

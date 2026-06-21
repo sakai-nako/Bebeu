@@ -12,12 +12,17 @@ use crate::entities::level::Level;
 use crate::entities::project::Project;
 use crate::shared::projection;
 
-use super::animation::AnimationFrames;
-use super::state_machine::PlayerState;
+use super::animation::{AnimationFrames, AnimationSet, VSYNC_TICK_SECS};
+use super::state_machine::CharacterState;
 
 /// Player を 1 体だけ識別する marker component。
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Player;
+
+/// Opponent (AI / 被弾対象) を識別する marker component。
+/// `Player` と排他で、入力 system や camera follow からは除外される。
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Enemy;
 
 /// battle viewport を映している Camera2d を識別する marker component。
 #[derive(Component, Debug, Clone, Copy)]
@@ -48,29 +53,49 @@ pub enum Facing {
 
 /// 1 秒あたりの移動量 (画像ピクセル)。Beat 'em up のキャラ歩行はだいたい
 /// 60-100 px/sec。後で Character.physics 由来にする想定で、現状は定数。
+///
+/// **60Hz pixel-perfect 補足**: 60 の整数倍 (60, 120, 180 ...) は毎 frame の
+/// snap step が「常に同じ px 数」になって完全に滑らかに見える。
+/// 非整数倍 (例: 80 = 1.333 px/frame) は snap pattern が `1, 2, 1, 1, 2 ...` の
+/// 3-frame 周期になるが、AnimationSet::Tick 順序整理後はこの程度の周期パターンは
+/// 体感的に許容できる。歩行速度の見た目を優先したい場合は 80 等の値も使ってよい。
 const MOVE_SPEED_PX_PER_SEC: f32 = 80.0;
 
 pub struct MovementPlugin;
 
 impl Plugin for MovementPlugin {
     fn build(&self, app: &mut App) {
+        // 全部 Update に乗せて、handle_input 側で **dt を VSYNC_TICK_SECS 固定** にする。
+        //
+        // FixedUpdate は wall-clock accumulator なので、vsync の僅かなブレで
+        // 1 render に 0 回 or 2 回走るドリフトが発生する (character の stall / jump として
+        // 視認される)。Bevy の Update は vsync と 1:1 で走るので、Update 内で dt を
+        // 固定値にするのが「frame = vsync = 1 step」を最も素直に実現できる。
+        // 60Hz 想定 (animation の VSYNC_TICK と整合)。
         app.add_systems(
             Update,
             (
                 handle_input,
-                (sync_transform, sync_flip, sync_anchor, camera_follow).after(handle_input),
+                // sync_anchor / sync_flip は AnimationFrames の frame 切替後に走らないと
+                // 「新 sprite.image + 旧 anchor/flip」の 1 frame ミスマッチが出る。
+                // sync_transform / camera_follow は anim 非依存だが、tuple ごとまとめて
+                // ordering を付けても害は無いのでそのまま after.
+                (sync_transform, sync_flip, sync_anchor, camera_follow)
+                    .after(handle_input)
+                    .after(AnimationSet::Tick),
             ),
         );
     }
 }
 
 fn handle_input(
-    time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     level: Option<Res<Level>>,
-    mut query: Query<(&mut WorldPosition, &mut Facing, &mut PlayerState), With<Player>>,
+    mut query: Query<(&mut WorldPosition, &mut Facing, &mut CharacterState), With<Player>>,
 ) {
-    let dt = time.delta_secs();
+    // 60Hz 固定。`time.delta()` を読むと vsync ブレが乗って snap step pattern が
+    // 不規則化するため、Update = vsync = 1 frame の前提で hardcode する。
+    let dt = VSYNC_TICK_SECS;
     let step = MOVE_SPEED_PX_PER_SEC * dt;
 
     let mut dx = 0.0;
@@ -87,14 +112,24 @@ fn handle_input(
     if keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW) {
         dz -= step;
     }
-    let target_state = if dx == 0.0 && dz == 0.0 {
-        PlayerState::Idle
+    let attack_pressed = keys.just_pressed(KeyCode::Space) || keys.just_pressed(KeyCode::KeyJ);
+    let move_target_state = if dx == 0.0 && dz == 0.0 {
+        CharacterState::Idle
     } else {
-        PlayerState::Walk
+        CharacterState::Walk
     };
     // Level 未設定なら制限なし扱い (ADR-0022 の fail-soft)
     let contains = |x: f32, z: f32| level.as_deref().is_none_or(|l| l.contains_xz(x, z));
     for (mut pos, mut facing, mut state) in &mut query {
+        if state.is_locked() {
+            // Attack 中は移動・向き変更・state 書き換え (Idle/Walk への落下) を抑制。
+            // 攻撃キーの先行入力もここでは捨てる (連打キャンセル等は別途設計)。
+            continue;
+        }
+        if attack_pressed {
+            *state = CharacterState::Attack;
+            continue;
+        }
         if dx != 0.0 || dz != 0.0 {
             let next = step_axis_aware(*pos, dx, dz, contains);
             pos.x = next.x;
@@ -107,8 +142,8 @@ fn handle_input(
             }
         }
         // Bevy の Changed<> をぶれずに発火させるため等価チェックして必要なときだけ書く
-        if *state != target_state {
-            *state = target_state;
+        if *state != move_target_state {
+            *state = move_target_state;
         }
     }
 }
@@ -134,9 +169,16 @@ pub fn step_axis_aware(
     next
 }
 
+/// WorldPosition は f32 連続値だが、画像描画は Nearest filter (Bevy default) なので
+/// transform を整数 pixel に snap してから projection に渡す。
+/// snap 無しだと world x の sub-pixel 揺らぎが nearest snap の境界 (.5) をまたぐ
+/// 瞬間にだけ sprite が 1 px 動いて見え、vsync の delta jitter と相互作用して
+/// 「frame ごとに 1px or 2px の step が不均一」に見える (= 横揺れ感)。
+/// 整数 snap すれば step は `1, 1, 2, 1, 1, 2 ...` 等の規則的パターンになり安定する。
 fn sync_transform(mut query: Query<(&WorldPosition, &mut Transform), Changed<WorldPosition>>) {
     for (pos, mut transform) in &mut query {
-        transform.translation = projection::world_to_bevy_f32(pos.x, pos.y, pos.z);
+        transform.translation =
+            projection::world_to_bevy_f32(pos.x.round(), pos.y.round(), pos.z.round());
     }
 }
 
@@ -198,7 +240,10 @@ fn camera_follow(
         return;
     };
     let half_view = project.resolution.width as f32 / 2.0;
-    transform.translation.x = clamp_camera_x(player_pos.x, half_view);
+    // sync_transform と同じ理由で整数 snap。player.x は f32 のまま保持し、camera と
+    // player 両方を同じ integer pixel に揃えることで両者の相対位置を sub-pixel ズレ
+    // させない (沿わせないと sprite の nearest snap で 1px ぶれる)。
+    transform.translation.x = clamp_camera_x(player_pos.x, half_view).round();
 }
 
 /// camera が world 左端を越えて左に行かないよう player の X を clamp する。

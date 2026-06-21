@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
-use crate::shared::{AttackBox, AttackBoxMeta, FlipMode, HitBox};
+use crate::shared::{AttackBox, AttackBoxMeta, AttackBoxOverride, FlipMode, HitBox};
 
 /// Character.depth の既定値 (world Z 厚み)。HitBox.depth が None の box はこの値にフォールバックする。
 /// 値の根拠: Stage 2 で導入した Level の Z bounds (-40..40 = 80) の 1/5 程度を 1 体ぶんの厚みとし、
@@ -127,7 +127,7 @@ pub struct Sprite {
     pub pivot_point: [i32; 2],
     pub body_boxes: Option<Vec<HitBox>>,
     /// 攻撃判定。`AttackBox = HitBox + Option<AttackBoxMeta>` で、meta は攻撃のダメージ /
-    /// Knockback ゲージ減算 / hitstun 延長 / 吹っ飛びベクトルを保持する (`shared::AttackBox`)。
+    /// Knockback ゲージ減算 / 吹っ飛びベクトルを保持する (`shared::AttackBox`)。
     /// 旧形式 (`Vec<HitBox>` を直接) は AttackBox 側の `serde(from = "RawAttackBox")` で
     /// deserialize 時に meta=None として吸収される。
     pub attack_boxes: Option<Vec<AttackBox>>,
@@ -284,12 +284,18 @@ impl BoxKind {
 
     /// Frame override の HitBox スライス相当を読み取る。`sprite_hitbox_slice` と対称。
     /// 3 状態 (None=Inherit / Some(empty)=Disable / Some(non-empty)=Override) を保つ。
+    /// Attack 側で `AttackBoxOverride.hitbox` が `None` (= sprite から継承中) の要素は
+    /// `HitBox::new(0,0,0,0)` の placeholder で埋める (描画は呼び出し側で個別に skip)。
+    /// 「override 配列の長さ」を保つために要素数は元と一致させる。
     #[must_use]
     pub fn frame_override_hitbox_slice(self, frame: &Frame) -> Option<Cow<'_, [HitBox]>> {
         match self {
             Self::Body => frame.body_box_overrides.as_deref().map(Cow::Borrowed),
             Self::Attack => frame.attack_box_overrides.as_deref().map(|v| {
-                let owned: Vec<HitBox> = v.iter().map(|ab| ab.hitbox.clone()).collect();
+                let owned: Vec<HitBox> = v
+                    .iter()
+                    .map(|ov| ov.hitbox.clone().unwrap_or_else(|| HitBox::new(0, 0, 0, 0)))
+                    .collect();
                 Cow::Owned(owned)
             }),
         }
@@ -308,7 +314,7 @@ impl BoxKind {
             Self::Attack => frame
                 .attack_box_overrides
                 .as_deref()
-                .map_or(0, <[AttackBox]>::len),
+                .map_or(0, <[AttackBoxOverride]>::len),
         }
     }
 
@@ -320,6 +326,35 @@ impl BoxKind {
         match self {
             Self::Body => frame.body_box_overrides.as_ref().map(Vec::len),
             Self::Attack => frame.attack_box_overrides.as_ref().map(Vec::len),
+        }
+    }
+
+    /// Attack 専用: 指定 index の override 要素で hitbox が `None` (= sprite から継承中)
+    /// かどうか。Body は常に `false` (継承機構が無い)。canvas の dashed 描画判定や
+    /// property panel の「(継承中)」表示判定に使う。
+    #[must_use]
+    pub fn is_frame_override_hitbox_inherited(self, frame: &Frame, index: usize) -> bool {
+        match self {
+            Self::Body => false,
+            Self::Attack => frame
+                .attack_box_overrides
+                .as_deref()
+                .and_then(|v| v.get(index))
+                .is_some_and(|ov| ov.hitbox.is_none()),
+        }
+    }
+
+    /// Attack 専用: 指定 index の override 要素で meta が `None` (= sprite から継承中)
+    /// かどうか。Body は常に `false` (meta が存在しない)。
+    #[must_use]
+    pub fn is_frame_override_meta_inherited(self, frame: &Frame, index: usize) -> bool {
+        match self {
+            Self::Body => false,
+            Self::Attack => frame
+                .attack_box_overrides
+                .as_deref()
+                .and_then(|v| v.get(index))
+                .is_some_and(|ov| ov.meta.is_none()),
         }
     }
 
@@ -340,8 +375,11 @@ impl BoxKind {
     }
 
     /// Frame override を Override に切り替え。既存 vec が空または None なら
-    /// `default_hitbox` を 1 つ入れて Override の意味を保つ。Attack 側は
-    /// `AttackBox::from_hitbox(default_hitbox)` (meta=None) で初期化する。
+    /// 1 要素入れて Override の意味を保つ。
+    /// Attack 側は `AttackBoxOverride::inherit_hitbox_with_default_meta()`
+    /// (hitbox=None, meta=Some(default)) で初期化する。これにより「box 自体は sprite を継承し、
+    /// meta だけ上書き」が UI から最短手数で作れる。sprite に対応 index の box が無い
+    /// 場合は呼び出し側で `replace_override_box` で hitbox を Some に書き換える。
     pub fn ensure_frame_override_present(self, frame: &mut Frame, default_hitbox: HitBox) {
         match self {
             Self::Body => {
@@ -353,14 +391,17 @@ impl BoxKind {
             Self::Attack => {
                 let slot = &mut frame.attack_box_overrides;
                 if slot.as_ref().is_none_or(Vec::is_empty) {
-                    *slot = Some(vec![AttackBox::from_hitbox(default_hitbox)]);
+                    *slot = Some(vec![AttackBoxOverride::inherit_hitbox_with_default_meta()]);
                 }
             }
         }
     }
 
     /// Frame override の末尾に box を 1 つ追加する。Vec が None なら新規生成する。
-    /// Attack 側は `AttackBox::from_hitbox(default_hitbox)` で push する (meta=None)。
+    /// Attack 側は `AttackBoxOverride::inherit_hitbox_with_default_meta()`
+    /// (hitbox=None, meta=Some(default)) で push する。
+    /// 「box 自体は sprite を継承 + meta だけ上書き」を UI からの最短手数にする方針
+    /// ([Add Box] 直後に damage 入力可能、hitbox 矩形は sprite を継承)。
     pub fn push_frame_override_box(self, frame: &mut Frame, default_hitbox: HitBox) {
         match self {
             Self::Body => {
@@ -369,7 +410,8 @@ impl BoxKind {
             }
             Self::Attack => {
                 let v = frame.attack_box_overrides.get_or_insert_with(Vec::new);
-                v.push(AttackBox::from_hitbox(default_hitbox));
+                let _ = default_hitbox; // hitbox は inherit を初期値とする (sprite から継承)
+                v.push(AttackBoxOverride::inherit_hitbox_with_default_meta());
             }
         }
     }
@@ -396,7 +438,9 @@ impl BoxKind {
         }
     }
 
-    /// Frame override の指定 index の HitBox を取得する (Attack の場合は AttackBox.hitbox)。
+    /// Frame override の指定 index の HitBox を取得する。Attack の場合は
+    /// `AttackBoxOverride.hitbox` (None = sprite から継承中) を返す。Body は常に `Some` (Body
+    /// 側に継承機構が無いため slot が存在すれば必ず HitBox を持つ)。
     #[must_use]
     pub fn get_frame_override_hitbox(self, frame: &Frame, index: usize) -> Option<HitBox> {
         match self {
@@ -409,12 +453,13 @@ impl BoxKind {
                 .attack_box_overrides
                 .as_deref()
                 .and_then(|v| v.get(index))
-                .map(|ab| ab.hitbox.clone()),
+                .and_then(|ov| ov.hitbox.clone()),
         }
     }
 
-    /// Frame override の指定 index の HitBox を差し替える。Attack の場合は AttackBox.hitbox
-    /// 部分のみ差し替え、meta は保持される。範囲外なら no-op。
+    /// Frame override の指定 index の HitBox を差し替える。Attack の場合は
+    /// `AttackBoxOverride.hitbox = Some(new_hitbox)` で **自動的に override 化** (= inherit
+    /// 状態だった場合は明示 override に切り替わる)、`meta` は保持される。範囲外なら no-op。
     pub fn replace_frame_override_hitbox(
         self,
         frame: &mut Frame,
@@ -433,9 +478,31 @@ impl BoxKind {
                 if let Some(v) = frame.attack_box_overrides.as_mut()
                     && let Some(slot) = v.get_mut(index)
                 {
-                    slot.hitbox = new_hitbox;
+                    slot.hitbox = Some(new_hitbox);
                 }
             }
+        }
+    }
+
+    /// Attack 専用: 指定 index の override 要素の `hitbox` を `None` に戻す (= sprite から
+    /// 継承するモードに切り替える)。範囲外 / Body の場合は no-op。
+    pub fn set_frame_override_hitbox_inherit(self, frame: &mut Frame, index: usize) {
+        if let Self::Attack = self
+            && let Some(v) = frame.attack_box_overrides.as_mut()
+            && let Some(slot) = v.get_mut(index)
+        {
+            slot.hitbox = None;
+        }
+    }
+
+    /// Attack 専用: 指定 index の override 要素の `meta` を `None` に戻す (= sprite から
+    /// 継承するモードに切り替える)。範囲外 / Body の場合は no-op。
+    pub fn set_frame_override_meta_inherit(self, frame: &mut Frame, index: usize) {
+        if let Self::Attack = self
+            && let Some(v) = frame.attack_box_overrides.as_mut()
+            && let Some(slot) = v.get_mut(index)
+        {
+            slot.meta = None;
         }
     }
 }
@@ -583,15 +650,19 @@ pub struct Animation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Frame {
     pub index: u32,
-    /// duration は ms。
-    pub duration: u32,
+    /// 60Hz vsync tick (= 1/60 秒) 単位の pose 寿命。engine の `Frame.ticks` と
+    /// 完全に同じ意味。例: `7` で 7 tick = 約 116.67 ms。yaml の field 名も `ticks`。
+    pub ticks: u32,
     pub flip: Option<FlipMode>,
     pub pivot_point_offset: Option<[i32; 2]>,
     pub body_box_overrides: Option<Vec<HitBox>>,
-    /// 攻撃判定の frame-override。`Sprite.attack_boxes` と同じ `Vec<AttackBox>` 型で、
-    /// 3 状態: `None`=Inherit / `Some(empty)`=Disable / `Some(non-empty)`=Override。
-    /// 旧形式 (`Vec<HitBox>`) は `AttackBox` の serde 互換で吸収される。
-    pub attack_box_overrides: Option<Vec<AttackBox>>,
+    /// 攻撃判定の frame-override。各要素は `AttackBoxOverride { hitbox: Option<HitBox>,
+    /// meta: Option<AttackBoxMeta> }` で、`hitbox` / `meta` を個別に Option 化しているので
+    /// **field 単位の partial override** が可能 (例: hitbox は sprite から継承して meta だけ
+    /// 上書き)。3 状態は Vec 全体で表す: `None`=Inherit (全 box が sprite を継承) /
+    /// `Some(empty)`=Disable / `Some(non-empty)`=Override (個別 box は内部 field で partial 化)。
+    /// 旧形式 (`Vec<HitBox>`) は `AttackBoxOverride` の serde 互換で吸収される。
+    pub attack_box_overrides: Option<Vec<AttackBoxOverride>>,
     /// この frame に進入した瞬間に再生する Sound 参照。`None` で無音。
     /// engine 側で `Character.FindSoundGroup(number)` から SoundGroup を引き、`Pick` で
     /// `weight` 付きランダムに 1 つの Sound を選んで再生する。`delay_ms` の分だけ
@@ -617,8 +688,8 @@ fn is_zero_u32(v: &u32) -> bool {
 }
 
 impl Frame {
-    /// 指定 index の override HitBox を取得。Attack の場合は AttackBox.hitbox を返す。
-    /// `Sprite::get_box` と対称。
+    /// 指定 index の override HitBox を取得。Attack の場合は `AttackBoxOverride.hitbox`
+    /// (None = sprite から継承中) を返す。`Sprite::get_box` と対称。
     #[must_use]
     pub fn get_override_box(&self, target: SelectedBox) -> Option<HitBox> {
         match target {
@@ -631,13 +702,14 @@ impl Frame {
                 .attack_box_overrides
                 .as_deref()
                 .and_then(|v| v.get(i))
-                .map(|ab| ab.hitbox.clone()),
+                .and_then(|ov| ov.hitbox.clone()),
         }
     }
 
-    /// 指定 index の override HitBox を置き換える。範囲外なら何もしない。
-    /// canvas 上の drag/resize 適用時に使う。Attack の場合は AttackBox.hitbox 部分のみ
-    /// 差し替え、meta は保持される。
+    /// 指定 index の override HitBox を置き換える。範囲外なら no-op。canvas 上の
+    /// drag/resize 適用時に使う。Attack の場合は `AttackBoxOverride.hitbox =
+    /// Some(new_box)` で **自動 override 化** (inherit 状態だった場合は明示 override に
+    /// 切り替わる)、`meta` は保持される。
     pub fn replace_override_box(&mut self, target: SelectedBox, new_box: HitBox) {
         match target {
             SelectedBox::Body(i) => {
@@ -651,21 +723,23 @@ impl Frame {
                 if let Some(boxes) = self.attack_box_overrides.as_mut()
                     && let Some(slot) = boxes.get_mut(i)
                 {
-                    slot.hitbox = new_box;
+                    slot.hitbox = Some(new_box);
                 }
             }
         }
     }
 
-    /// Attack 専用: 指定 index の AttackBox override (meta 含む) を取得する。
+    /// Attack 専用: 指定 index の AttackBoxOverride (hitbox / meta 各 Option) を取得する。
+    /// `hitbox` / `meta` のいずれも `None` なら sprite から継承中。
     #[must_use]
-    pub fn get_attack_override(&self, index: usize) -> Option<&AttackBox> {
+    pub fn get_attack_override(&self, index: usize) -> Option<&AttackBoxOverride> {
         self.attack_box_overrides
             .as_deref()
             .and_then(|v| v.get(index))
     }
 
-    /// Attack 専用: 指定 index の AttackBox override の meta を差し替える。範囲外なら no-op。
+    /// Attack 専用: 指定 index の AttackBoxOverride の meta を差し替える (Some/None どちらも
+    /// 取れる: None で sprite から継承)。範囲外なら no-op。
     pub fn replace_attack_override_meta(&mut self, index: usize, new_meta: Option<AttackBoxMeta>) {
         if let Some(boxes) = self.attack_box_overrides.as_mut()
             && let Some(slot) = boxes.get_mut(index)
@@ -692,10 +766,13 @@ pub struct Layer {
 mod tests {
     use super::*;
 
-    fn frame_with_overrides(body: Option<Vec<HitBox>>, attack: Option<Vec<AttackBox>>) -> Frame {
+    fn frame_with_overrides(
+        body: Option<Vec<HitBox>>,
+        attack: Option<Vec<AttackBoxOverride>>,
+    ) -> Frame {
         Frame {
             index: 0,
-            duration: 0,
+            ticks: 0,
             flip: None,
             pivot_point_offset: None,
             body_box_overrides: body,
@@ -755,21 +832,27 @@ mod tests {
             knockback_damage: 20,
             ..Default::default()
         };
-        let ab = AttackBox {
-            hitbox: HitBox::new(0, 0, 1, 1),
+        let ov = AttackBoxOverride {
+            hitbox: Some(HitBox::new(0, 0, 1, 1)),
             meta: Some(meta),
         };
-        let mut f = frame_with_overrides(None, Some(vec![ab]));
+        let mut f = frame_with_overrides(None, Some(vec![ov]));
         f.replace_override_box(SelectedBox::Attack(0), HitBox::new(5, 5, 10, 10));
         let updated = f.get_attack_override(0).expect("attack box exists");
-        assert_eq!(updated.hitbox.top_left(), [5, 5]);
+        assert_eq!(
+            updated.hitbox.as_ref().expect("hitbox set").top_left(),
+            [5, 5]
+        );
         assert_eq!(updated.meta, Some(meta));
     }
 
     #[test]
     fn replace_attack_override_meta_updates_meta_only() {
-        let ab = AttackBox::from_hitbox(HitBox::new(0, 0, 1, 1));
-        let mut f = frame_with_overrides(None, Some(vec![ab]));
+        let ov = AttackBoxOverride {
+            hitbox: Some(HitBox::new(0, 0, 1, 1)),
+            meta: None,
+        };
+        let mut f = frame_with_overrides(None, Some(vec![ov]));
         let new_meta = AttackBoxMeta {
             damage: 30,
             ..Default::default()
@@ -778,7 +861,82 @@ mod tests {
         let updated = f.get_attack_override(0).expect("attack box exists");
         assert_eq!(updated.meta, Some(new_meta));
         // hitbox は変わらない
-        assert_eq!(updated.hitbox.top_left(), [0, 0]);
-        assert_eq!(updated.hitbox.bottom_right(), [1, 1]);
+        let hb = updated.hitbox.as_ref().expect("hitbox set");
+        assert_eq!(hb.top_left(), [0, 0]);
+        assert_eq!(hb.bottom_right(), [1, 1]);
+    }
+
+    #[test]
+    fn replace_override_box_promotes_inherit_to_override_on_attack() {
+        // Attack の hitbox=None (inherit 状態) に drag/resize 適用すると Some に昇格する。
+        let ov = AttackBoxOverride {
+            hitbox: None,
+            meta: Some(AttackBoxMeta::default()),
+        };
+        let mut f = frame_with_overrides(None, Some(vec![ov]));
+        f.replace_override_box(SelectedBox::Attack(0), HitBox::new(2, 3, 10, 12));
+        let updated = f.get_attack_override(0).expect("attack box exists");
+        let hb = updated.hitbox.as_ref().expect("hitbox promoted to Some");
+        assert_eq!(hb.top_left(), [2, 3]);
+        assert_eq!(hb.bottom_right(), [10, 12]);
+        // meta は保持
+        assert_eq!(updated.meta, Some(AttackBoxMeta::default()));
+    }
+
+    #[test]
+    fn box_kind_is_frame_override_hitbox_inherited_returns_true_when_hitbox_none() {
+        let ov = AttackBoxOverride {
+            hitbox: None,
+            meta: Some(AttackBoxMeta::default()),
+        };
+        let f = frame_with_overrides(None, Some(vec![ov]));
+        assert!(BoxKind::Attack.is_frame_override_hitbox_inherited(&f, 0));
+        assert!(!BoxKind::Attack.is_frame_override_meta_inherited(&f, 0));
+    }
+
+    #[test]
+    fn box_kind_is_frame_override_meta_inherited_returns_true_when_meta_none() {
+        let ov = AttackBoxOverride {
+            hitbox: Some(HitBox::new(0, 0, 1, 1)),
+            meta: None,
+        };
+        let f = frame_with_overrides(None, Some(vec![ov]));
+        assert!(!BoxKind::Attack.is_frame_override_hitbox_inherited(&f, 0));
+        assert!(BoxKind::Attack.is_frame_override_meta_inherited(&f, 0));
+    }
+
+    #[test]
+    fn box_kind_set_frame_override_hitbox_inherit_clears_hitbox() {
+        let ov = AttackBoxOverride::full(HitBox::new(0, 0, 1, 1), AttackBoxMeta::default());
+        let mut f = frame_with_overrides(None, Some(vec![ov]));
+        BoxKind::Attack.set_frame_override_hitbox_inherit(&mut f, 0);
+        let updated = f.get_attack_override(0).expect("attack box exists");
+        assert!(updated.hitbox.is_none());
+        assert!(updated.meta.is_some());
+    }
+
+    #[test]
+    fn box_kind_set_frame_override_meta_inherit_clears_meta() {
+        let ov = AttackBoxOverride::full(HitBox::new(0, 0, 1, 1), AttackBoxMeta::default());
+        let mut f = frame_with_overrides(None, Some(vec![ov]));
+        BoxKind::Attack.set_frame_override_meta_inherit(&mut f, 0);
+        let updated = f.get_attack_override(0).expect("attack box exists");
+        assert!(updated.meta.is_none());
+        assert!(updated.hitbox.is_some());
+    }
+
+    #[test]
+    fn box_kind_push_frame_override_box_attack_inherits_hitbox_with_default_meta() {
+        // ユーザーの典型ユースケース: [Add Box] 直後は hitbox=None (sprite 継承)、
+        // meta=Some(default) (上書きモードで即 damage 入力可能)。
+        let mut f = frame_with_overrides(None, None);
+        BoxKind::Attack.push_frame_override_box(&mut f, HitBox::new(0, 0, 16, 16));
+        let v = f.attack_box_overrides.as_ref().expect("overrides exist");
+        assert_eq!(v.len(), 1);
+        assert!(
+            v[0].hitbox.is_none(),
+            "default Add Box should inherit hitbox"
+        );
+        assert_eq!(v[0].meta, Some(AttackBoxMeta::default()));
     }
 }

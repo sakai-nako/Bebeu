@@ -299,7 +299,8 @@ fn BoxRow(
     let depth = hit_box.depth();
 
     // 1 座標を更新して新しい HitBox を構築する (HitBox::new で正規化される)。
-    // Attack の場合は AttackBox.hitbox 部分のみ差し替え、meta は `BoxKind` 側で保持される。
+    // Attack の場合は AttackBoxOverride.hitbox = Some(new) で自動 override 化される
+    // (= inherit 状態でも編集すると Some 昇格する)。meta は保持される。
     let update_coord = use_callback(move |(corner, value): (HitBoxCorner, i32)| {
         let mut updated = draft();
         let Some(f) = updated.frames.get_mut(frame_index) else {
@@ -354,6 +355,20 @@ fn BoxRow(
 
     // Attack 系列のみ AttackBoxMeta 編集 UI を出す。Body には meta が無い。
     let is_attack = target == BoxKind::Attack;
+
+    // Attack の partial inherit 状態 (hitbox / meta が sprite から継承中か) を draft から取り直す。
+    // Body の場合は常に false (継承機構が無い)。
+    let hitbox_inherited = is_attack
+        && draft()
+            .frames
+            .get(frame_index)
+            .is_some_and(|f| target.is_frame_override_hitbox_inherited(f, box_index));
+    let meta_inherited = is_attack
+        && draft()
+            .frames
+            .get(frame_index)
+            .is_some_and(|f| target.is_frame_override_meta_inherited(f, box_index));
+
     let attack_meta: Option<AttackBoxMeta> = if is_attack {
         draft()
             .frames
@@ -373,46 +388,88 @@ fn BoxRow(
         draft.set(updated);
     });
 
+    // hitbox inherit toggle: ON で hitbox=None (= sprite から継承)、OFF で default box を Some に。
+    // sprite から copy する仕組みは持たない (= default 値で Some 化)。継承解除直後にユーザーが
+    // 座標を編集する流れを想定。
+    let toggle_hitbox_inherit = use_callback(move |new_inherit: bool| {
+        let mut updated = draft();
+        let Some(f) = updated.frames.get_mut(frame_index) else {
+            return;
+        };
+        if new_inherit {
+            target.set_frame_override_hitbox_inherit(f, box_index);
+        } else {
+            // 解除時は default box (16x16) で Some 化。
+            target.replace_frame_override_hitbox(f, box_index, default_override_box());
+        }
+        history.record();
+        draft.set(updated);
+    });
+
+    // meta inherit toggle: ON で meta=None (= sprite から継承)、OFF で AttackBoxMeta::default() を Some に。
+    let toggle_meta_inherit = use_callback(move |new_inherit: bool| {
+        let mut updated = draft();
+        let Some(f) = updated.frames.get_mut(frame_index) else {
+            return;
+        };
+        if new_inherit {
+            target.set_frame_override_meta_inherit(f, box_index);
+        } else {
+            f.replace_attack_override_meta(box_index, Some(AttackBoxMeta::default()));
+        }
+        history.record();
+        draft.set(updated);
+    });
+
     let input_class = "input input-bordered input-xs w-12";
+    // Sprite editor 側の BoxListItem と揃えて、Body/Attack を色付き badge で識別できるようにする。
+    let badge_class = target.list_badge_classes();
+    let badge_label = format!("{}{box_index}", target.label_prefix());
     rsx! {
         div { class: "space-y-1",
             div { class: "{row_class}", onclick: on_select,
-                span { class: "font-mono w-6 text-base-content/60", "#{box_index}" }
-                HitBoxCornerInput {
-                    corner: HitBoxCorner::TopLeftX,
-                    value: tl[0],
-                    class: input_class,
-                    on_change: move |v| update_coord.call((HitBoxCorner::TopLeftX, v)),
-                }
-                HitBoxCornerInput {
-                    corner: HitBoxCorner::TopLeftY,
-                    value: tl[1],
-                    class: input_class,
-                    on_change: move |v| update_coord.call((HitBoxCorner::TopLeftY, v)),
-                }
-                span { class: "text-base-content/40", "→" }
-                HitBoxCornerInput {
-                    corner: HitBoxCorner::BottomRightX,
-                    value: br[0],
-                    class: input_class,
-                    on_change: move |v| update_coord.call((HitBoxCorner::BottomRightX, v)),
-                }
-                HitBoxCornerInput {
-                    corner: HitBoxCorner::BottomRightY,
-                    value: br[1],
-                    class: input_class,
-                    on_change: move |v| update_coord.call((HitBoxCorner::BottomRightY, v)),
-                }
-                span {
-                    class: "text-xs text-base-content/60 ml-1",
-                    title: "world Z 厚み",
-                    "Z"
-                }
-                HitBoxDepthInput {
-                    current: depth,
-                    fallback: character_depth,
-                    class: input_class,
-                    on_change: move |v| update_depth.call(v),
+                span { class: "{badge_class}", "{badge_label}" }
+                if hitbox_inherited {
+                    span { class: "italic text-base-content/60 flex-1",
+                        "(sprite #{box_index} の hitbox を継承中)"
+                    }
+                } else {
+                    HitBoxCornerInput {
+                        corner: HitBoxCorner::TopLeftX,
+                        value: tl[0],
+                        class: input_class,
+                        on_change: move |v| update_coord.call((HitBoxCorner::TopLeftX, v)),
+                    }
+                    HitBoxCornerInput {
+                        corner: HitBoxCorner::TopLeftY,
+                        value: tl[1],
+                        class: input_class,
+                        on_change: move |v| update_coord.call((HitBoxCorner::TopLeftY, v)),
+                    }
+                    span { class: "text-base-content/40", "→" }
+                    HitBoxCornerInput {
+                        corner: HitBoxCorner::BottomRightX,
+                        value: br[0],
+                        class: input_class,
+                        on_change: move |v| update_coord.call((HitBoxCorner::BottomRightX, v)),
+                    }
+                    HitBoxCornerInput {
+                        corner: HitBoxCorner::BottomRightY,
+                        value: br[1],
+                        class: input_class,
+                        on_change: move |v| update_coord.call((HitBoxCorner::BottomRightY, v)),
+                    }
+                    span {
+                        class: "text-xs text-base-content/60 ml-1",
+                        title: "world Z 厚み",
+                        "Z"
+                    }
+                    HitBoxDepthInput {
+                        current: depth,
+                        fallback: character_depth,
+                        class: input_class,
+                        on_change: move |v| update_depth.call(v),
+                    }
                 }
                 button {
                     class: "btn btn-ghost btn-xs text-error ml-auto",
@@ -421,12 +478,43 @@ fn BoxRow(
                     "✕"
                 }
             }
-            // Attack だけ meta (Damage/KnockbackDamage/HitstunExtra/Knockback Vec3) を編集できる。
+            // Attack だけ inherit toggle + meta 編集 UI を出す。Body には meta も継承機構も無い。
             if is_attack {
-                div { class: "ml-7",
-                    AttackMetaInputs {
-                        meta: attack_meta,
-                        on_change: move |v| update_attack_meta.call(v),
+                div { class: "ml-7 space-y-1",
+                    // hitbox inherit toggle
+                    label { class: "label cursor-pointer justify-start gap-2 py-0",
+                        input {
+                            r#type: "checkbox",
+                            class: "checkbox checkbox-xs",
+                            checked: hitbox_inherited,
+                            onchange: move |evt| toggle_hitbox_inherit.call(evt.checked()),
+                        }
+                        span { class: "label-text text-xs",
+                            "hitbox を sprite から継承"
+                        }
+                    }
+                    // meta inherit toggle
+                    label { class: "label cursor-pointer justify-start gap-2 py-0",
+                        input {
+                            r#type: "checkbox",
+                            class: "checkbox checkbox-xs",
+                            checked: meta_inherited,
+                            onchange: move |evt| toggle_meta_inherit.call(evt.checked()),
+                        }
+                        span { class: "label-text text-xs",
+                            "meta を sprite から継承"
+                        }
+                    }
+                    // meta 編集 UI: 継承中はラベルだけ、それ以外は通常入力
+                    if meta_inherited {
+                        div { class: "italic text-base-content/60 text-xs",
+                            "(sprite #{box_index} の meta を継承中)"
+                        }
+                    } else {
+                        AttackMetaInputs {
+                            meta: attack_meta,
+                            on_change: move |v| update_attack_meta.call(v),
+                        }
                     }
                 }
             }

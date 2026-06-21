@@ -3,7 +3,8 @@ pub use webview_assets::{WORKSPACE_ASSET_SCHEME, WORKSPACE_ASSET_URL_PREFIX, wor
 
 mod collision;
 pub use collision::{
-    AttackBox, AttackBoxMeta, FlipMode, HitBox, HitBoxCorner, KnockbackVec, ResizeHandle,
+    AttackBox, AttackBoxMeta, AttackBoxOverride, FlipMode, HitBox, HitBoxCorner, HitStop,
+    KnockbackVec, ResizeHandle,
 };
 
 mod config;

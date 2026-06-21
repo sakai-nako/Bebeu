@@ -1,0 +1,21 @@
+name: attack
+number: 3
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [14, 12]
+    bottom_right: [34, 60]
+    depth: 16
+- index: 1
+  path: 002.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [14, 12]
+    bottom_right: [34, 60]
+    depth: 16

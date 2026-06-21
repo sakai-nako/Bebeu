@@ -154,15 +154,19 @@ pub fn SpriteCanvas(
     };
     let any_box_drag = active_box_target.is_some();
 
-    // 画像はクリックで Pivot 操作を発火しない（誤操作防止）。Pivot は専用のマーカーで操作する。
+    // 画像本体上で mousedown すると Pivot ドラッグを開始する (専用 marker と等価)。
+    // BodyBox / AttackBox overlay は後段で stop_propagation しているので、Box の上では
+    // ここに届かない (= 「Box 上はドラッグ無効」が自動で成立)。
     // Box ドラッグ中だけ少し dim させてフォーカスを譲る。
     // 編集 img は static にしておくこと。Tailwind preflight の `max-width: 100%` が、
     // wrapper が 0×0 だと max-width=0 となって img が消える。代わりに Back reference 側に
     // `z-index: -1` を付けることで、static の img より奥に描画させる。
     let img_class = if any_box_drag {
         "block opacity-70"
+    } else if is_pivot_drag {
+        "block cursor-grabbing"
     } else {
-        "block"
+        "block cursor-grab"
     };
 
     // Pivot マーカーの色: MoveSprite 中は warning に切り替え、Box ドラッグ中は dim
@@ -237,7 +241,8 @@ pub fn SpriteCanvas(
         move |_evt: MouseEvent| dragging.set(None)
     };
 
-    let on_pivot_mousedown = {
+    // Pivot drag を開始する共通ロジック。SVG marker / 画像本体の両方の mousedown で使う。
+    let start_pivot_drag = {
         let mut dragging = dragging;
         let mut history = history;
         move |evt: MouseEvent| {
@@ -255,6 +260,9 @@ pub fn SpriteCanvas(
             )));
         }
     };
+    // closure は Copy なので 2 箇所に渡しても move にならない (clippy::clone_on_copy 回避)。
+    let on_pivot_mousedown = start_pivot_drag;
+    let on_image_mousedown = start_pivot_drag;
 
     let on_wheel = {
         let mut zoom = zoom;
@@ -320,6 +328,7 @@ pub fn SpriteCanvas(
                     // 画像上で mousedown→dragstart が発火すると、進行中の Pivot / Box ドラッグでも
                     // mousemove がドラッグイベントに置き換わって我々のハンドラに届かなくなる。
                     draggable: false,
+                    onmousedown: on_image_mousedown,
                 }
 
                 // 元画像の外枠: image と同じ位置・サイズに box-border の枠線だけを重ねる。

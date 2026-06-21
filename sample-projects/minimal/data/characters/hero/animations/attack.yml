@@ -1,0 +1,44 @@
+name: attack
+role: attack
+variant: 0
+is_loop: false
+loop_start_index: 0
+frames:
+- index: 0
+  ticks: 5
+  flip: null
+  pivot_point_offset: null
+  body_box_overrides: null
+  attack_box_overrides: null
+  layers:
+  - index: 0
+    sprite_group_number: 3
+    sprite_index: 0
+    transparency: 1.0
+    flip: null
+    pivot_point_offset: null
+- index: 1
+  ticks: 10
+  flip: null
+  pivot_point_offset: null
+  body_box_overrides: null
+  attack_box_overrides:
+  - meta:
+      damage: 20
+      knockback_damage: 1
+      knockback:
+        vel_x: 0.0
+        vel_y: 0.0
+        vel_z: 0.0
+      hit_stop:
+        shake_x: -5
+        shake_y: 0
+        count: 5
+        decay: 0.0
+  layers:
+  - index: 0
+    sprite_group_number: 3
+    sprite_index: 1
+    transparency: 1.0
+    flip: null
+    pivot_point_offset: null

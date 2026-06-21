@@ -934,10 +934,10 @@ fn filesystem_rename_animation_rejects_existing() -> Result<()> {
 
 // ---------- Animation update_animation ----------
 
-fn sample_frame(index: u32, duration: u32) -> Frame {
+fn sample_frame(index: u32, ticks: u32) -> Frame {
     Frame {
         index,
-        duration,
+        ticks,
         flip: None,
         pivot_point_offset: None,
         body_box_overrides: None,
@@ -968,7 +968,7 @@ fn in_memory_update_animation_replaces_in_place() -> Result<()> {
         .find(|a| a.name == "walk")
         .expect("walk animation should exist");
     assert_eq!(walk.frames.len(), 1);
-    assert_eq!(walk.frames[0].duration, 80);
+    assert_eq!(walk.frames[0].ticks, 80);
     // 別の Animation には影響しない
     let idle = got
         .animations
@@ -1022,7 +1022,7 @@ fn filesystem_update_animation_writes_only_target_yml() -> Result<()> {
     // walk.yml が新内容になっている
     let walk_yml_after = fs::read_to_string(anim_dir.join("walk.yml"))?;
     assert!(walk_yml_after.contains("is_loop: false"));
-    assert!(walk_yml_after.contains("duration: 100"));
+    assert!(walk_yml_after.contains("ticks: 100"));
     // idle.yml は変わっていない
     let idle_yml_after = fs::read_to_string(anim_dir.join("idle.yml"))?;
     assert_eq!(idle_yml_before, idle_yml_after);

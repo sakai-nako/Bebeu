@@ -6,15 +6,25 @@
 //! ファイル分割にとどめる (segment 規約からは外れるが、ECS の system 分類として
 //! 実用的)。
 mod animation;
+mod attack;
+mod hit_stop;
+mod hitbox_debug;
 mod movement;
 mod state_machine;
 // 将来の追加先 (雛形のみ。中身が育ったら個別に pub use を増やす)。
 mod ai;
-mod attack;
-mod hitbox_debug;
 
-pub use animation::{AnimationFrames, AnimationPlugin, FrameRender};
-pub use movement::{
-    Facing, MainCamera, MovementPlugin, Player, WorldPosition, flip_anchor, total_flip_x,
+pub use animation::{
+    AnimationFrames, AnimationPlugin, AnimationSet, FrameRender, VSYNC_TICK, VSYNC_TICK_SECS,
 };
-pub use state_machine::{AnimationData, PlayerAnimationLibrary, PlayerState, StateMachinePlugin};
+pub use attack::{
+    AttackBox, AttackHitConsumed, AttackPlugin, BodyBox, CharacterDepth, HitPoints, aabb_intersects,
+};
+pub use hit_stop::{HitStopPlugin, HitStopState};
+pub use hitbox_debug::{HitboxDebugEnabled, HitboxDebugPlugin};
+pub use movement::{
+    Enemy, Facing, MainCamera, MovementPlugin, Player, WorldPosition, flip_anchor, total_flip_x,
+};
+pub use state_machine::{
+    AnimationData, CharacterState, EnemyAnimationSet, PlayerAnimationLibrary, StateMachinePlugin,
+};

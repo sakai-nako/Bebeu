@@ -15,7 +15,9 @@ pub struct RuntimePaths {
 impl RuntimePaths {
     pub fn resolve() -> Self {
         if let Some(env_root) = std::env::var_os("BEATEMUP_RUNTIME_DIR") {
-            return Self { root: PathBuf::from(env_root) };
+            return Self {
+                root: PathBuf::from(env_root),
+            };
         }
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let root = manifest
@@ -32,11 +34,17 @@ impl RuntimePaths {
     }
 
     pub fn project_file(&self, name: &str) -> PathBuf {
-        self.root.join("data").join("projects").join(format!("{name}.yml"))
+        self.root
+            .join("data")
+            .join("projects")
+            .join(format!("{name}.yml"))
     }
 
     pub fn character_file(&self, name: &str) -> PathBuf {
-        self.root.join("data").join("characters").join(format!("{name}.yml"))
+        self.root
+            .join("data")
+            .join("characters")
+            .join(format!("{name}.yml"))
     }
 
     /// character のディレクトリ (`runtime/data/characters/{name}/`)。
@@ -46,7 +54,10 @@ impl RuntimePaths {
     }
 
     pub fn level_file(&self, name: &str) -> PathBuf {
-        self.root.join("data").join("levels").join(format!("{name}.yml"))
+        self.root
+            .join("data")
+            .join("levels")
+            .join(format!("{name}.yml"))
     }
 
     /// sprite-group YAML (`runtime/data/characters/{character}/sprite-groups/{group}.yml`)。

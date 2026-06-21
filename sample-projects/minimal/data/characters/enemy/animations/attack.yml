@@ -1,0 +1,20 @@
+name: attack
+role: attack
+variant: 0
+is_loop: false
+loop_start_index: 0
+frames:
+- index: 0
+  ticks: 5
+  layers:
+  - index: 0
+    sprite_group_number: 3
+    sprite_index: 0
+    transparency: 1.0
+- index: 1
+  ticks: 10
+  layers:
+  - index: 0
+    sprite_group_number: 3
+    sprite_index: 1
+    transparency: 1.0

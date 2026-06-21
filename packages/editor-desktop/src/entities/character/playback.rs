@@ -4,7 +4,8 @@
 //! - `use_playback_provider` を `AnimationEditor` で 1 回呼び、`use_playback` で子から消費
 //!   (`Preferences` / `NavigationGuard` と同じ context-shared Signal の慣習)
 //! - `spawn_playback_thread` は `std::thread::spawn` ベースのタイマー。
-//!   `Frame.duration` ぶん sleep して次のフレームを `pending_frame` に書き込む
+//!   `Frame.ticks` 個ぶん vsync 待ち (= `ticks * 1/60 秒` sleep) して次のフレームを
+//!   `pending_frame` に書き込む
 //!
 //! ## Sync Signal とブリッジ
 //!
@@ -55,7 +56,8 @@ impl PlaybackState {
 /// Send + Sync で thread に渡せる。UI 側で `draft` 変更時に再構築する。
 #[derive(Debug, Clone, Default)]
 pub struct PlaybackConfig {
-    pub frame_durations: Vec<u32>,
+    /// 各 frame の寿命 (60Hz vsync tick 数)。エンジンの `Frame.ticks` と同じ単位。
+    pub frame_ticks: Vec<u32>,
     pub is_loop: bool,
     pub loop_start_index: u32,
 }
@@ -64,7 +66,7 @@ impl PlaybackConfig {
     #[must_use]
     pub fn from_animation(anim: &Animation) -> Self {
         Self {
-            frame_durations: anim.frames.iter().map(|f| f.duration).collect(),
+            frame_ticks: anim.frames.iter().map(|f| f.ticks).collect(),
             is_loop: anim.is_loop,
             loop_start_index: anim.loop_start_index,
         }
@@ -94,7 +96,8 @@ enum NextStep {
     Stop,
 }
 
-/// `Frame.duration` ぶん sleep しながら次のフレーム index を `pending_frame` に書き込むタイマースレッド。
+/// `Frame.ticks` ぶん sleep しながら次のフレーム index を `pending_frame` に書き込むタイマースレッド。
+/// tick → 実時間の換算は 60Hz vsync 想定 (`VSYNC_TICK = 1/60 秒`) で engine と統一。
 ///
 /// 末尾到達時:
 /// - `is_loop` = true ならば `loop_start_index` へジャンプして継続
@@ -110,8 +113,11 @@ pub fn spawn_playback_thread(
 ) {
     // cancel チェック粒度。短すぎると wakeup 過多、長すぎると Pause/Stop の体感遅延になる。
     const CHUNK: Duration = Duration::from_millis(20);
-    // duration が 0 のフレームに当たった時のフォールバック (busy loop 回避)。
-    const MIN_FRAME_MS: u32 = 1;
+    // ticks=0 のフレームに当たった時のフォールバック (busy loop 回避、最低 1 tick = 約 16.67ms)。
+    const MIN_TICKS: u32 = 1;
+    // engine の `animation::VSYNC_TICK` と同じ値。pkg をまたいで参照すると依存が大きく
+    // なるので、editor 側にもローカルに同じ定数を置く。
+    const VSYNC_TICK: Duration = Duration::from_micros(16_667);
 
     std::thread::spawn(move || {
         // スレッド内のローカル frame index。pending_frame に Some(idx) を書くと UI で
@@ -123,25 +129,20 @@ pub fn spawn_playback_thread(
                 return;
             }
 
-            // 現在のフレーム duration / loop 情報を Sync Signal から読む
-            let (duration_ms, total_frames, is_loop, loop_start) = {
+            // 現在のフレーム ticks / loop 情報を Sync Signal から読む
+            let (frame_ticks, total_frames, is_loop, loop_start) = {
                 let cfg = config.peek();
-                let dur = cfg
-                    .frame_durations
+                let t = cfg
+                    .frame_ticks
                     .get(current)
                     .copied()
-                    .unwrap_or(50)
-                    .max(MIN_FRAME_MS);
-                (
-                    dur,
-                    cfg.frame_durations.len(),
-                    cfg.is_loop,
-                    cfg.loop_start_index,
-                )
+                    .unwrap_or(3)
+                    .max(MIN_TICKS);
+                (t, cfg.frame_ticks.len(), cfg.is_loop, cfg.loop_start_index)
             };
 
             // chunk 単位で sleep して cancel に反応する
-            let total = Duration::from_millis(u64::from(duration_ms));
+            let total = VSYNC_TICK * frame_ticks;
             let mut elapsed = Duration::ZERO;
             while elapsed < total {
                 if cancel.load(Ordering::Relaxed) {

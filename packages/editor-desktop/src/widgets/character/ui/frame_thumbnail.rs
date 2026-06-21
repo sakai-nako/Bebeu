@@ -11,7 +11,7 @@ pub fn FrameThumbnail(character: Character, frame: Frame) -> Element {
         div { class: "card bg-base-100 border border-base-300 rounded-box p-2 space-y-1",
             div { class: "flex items-center justify-between gap-2 text-xs",
                 span { class: "font-mono font-semibold", "#{frame.index}" }
-                span { class: "text-base-content/60", "{frame.duration}ms" }
+                span { class: "text-base-content/60", "{frame.ticks}t" }
             }
             div { class: "flex flex-row flex-wrap gap-1",
                 for layer in frame.layers.iter() {

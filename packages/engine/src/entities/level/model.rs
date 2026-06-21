@@ -135,10 +135,8 @@ impl Area {
             (self.near_min_x as f32, self.near_max_x as f32)
         } else {
             let t = (z - nz) / (fz - nz);
-            let left =
-                self.near_min_x as f32 + t * (self.far_min_x - self.near_min_x) as f32;
-            let right =
-                self.near_max_x as f32 + t * (self.far_max_x - self.near_max_x) as f32;
+            let left = self.near_min_x as f32 + t * (self.far_min_x - self.near_min_x) as f32;
+            let right = self.near_max_x as f32 + t * (self.far_max_x - self.near_max_x) as f32;
             (left, right)
         };
         x >= left && x <= right

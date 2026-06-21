@@ -64,17 +64,28 @@ pub fn AnimationEditor(character: Character, animation: Animation) -> Element {
             // タイトル（Rename / Delete / Number 編集は CharacterDetail で行う）
             h1 { class: "text-2xl font-bold", "{animation.name}" }
 
-            // 上段: 左に Canvas、右に Property Panel
+            // T 字レイアウト: 左カラム (Canvas 上 / Timeline 下) + 右カラム (Property Panel 全高)。
+            // Timeline は Canvas 幅と一致するため、Panel は縦に長く確保できる。
             div { class: "flex gap-3 flex-1 min-h-0",
-                div { class: "flex-1 overflow-hidden bg-base-100 rounded-box",
-                    AnimationCanvas {
+                div { class: "flex-1 flex flex-col gap-3 min-w-0",
+                    div { class: "flex-1 overflow-hidden bg-base-100 rounded-box",
+                        AnimationCanvas {
+                            character: character.clone(),
+                            draft,
+                            history,
+                            selected_frame_index,
+                            selected_layer_index,
+                            selected_box,
+                            references,
+                            visibility,
+                        }
+                    }
+                    AnimationTimeline {
                         character: character.clone(),
                         draft,
                         history,
                         selected_frame_index,
-                        selected_box,
-                        references,
-                        visibility,
+                        selected_layer_index,
                     }
                 }
                 div { class: "w-80 shrink-0",
@@ -88,15 +99,6 @@ pub fn AnimationEditor(character: Character, animation: Animation) -> Element {
                         references,
                     }
                 }
-            }
-
-            // 下段: Frame Timeline
-            AnimationTimeline {
-                character: character.clone(),
-                draft,
-                history,
-                selected_frame_index,
-                selected_layer_index,
             }
         }
     }

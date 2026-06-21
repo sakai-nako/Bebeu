@@ -16,17 +16,21 @@ pub(super) fn AnimationRoleSection(
     mut history: UseHistory<Animation>,
     physics: CharacterPhysics,
 ) -> Element {
-    let (role, variant, export_number, is_loop, anim_duration_ms) = {
+    let (role, variant, export_number, is_loop, anim_total_ticks) = {
         let snap = draft.read();
-        let dur: u32 = snap.frames.iter().map(|f| f.duration).sum();
+        let ticks: u32 = snap.frames.iter().map(|f| f.ticks).sum();
         (
             snap.role,
             snap.variant,
             snap.export_number,
             snap.is_loop,
-            dur,
+            ticks,
         )
     };
+    // physics.lie_down_duration_ms / rise_duration_ms との比較は ms 単位で出すため、
+    // ticks を 60Hz 想定で ms 換算してから渡す (ticks * 1000 / 60)。
+    let anim_duration_ms =
+        u32::try_from(u64::from(anim_total_ticks) * 1000 / 60).unwrap_or(u32::MAX);
     let terminator_text = build_terminator_text(role, is_loop, anim_duration_ms, &physics);
     let single = role.is_single_cardinality();
     let export_value = export_number.map(|n| n.to_string()).unwrap_or_default();

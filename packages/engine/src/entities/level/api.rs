@@ -91,7 +91,11 @@ mod tests {
     #[test]
     fn broken_yaml_is_error() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = write_yaml(dir.path(), "broken", "this is :: not a valid yaml :: at all\n")?;
+        let path = write_yaml(
+            dir.path(),
+            "broken",
+            "this is :: not a valid yaml :: at all\n",
+        )?;
         assert!(Level::load_from_file(&path, "broken").is_err());
         Ok(())
     }

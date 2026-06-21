@@ -12,8 +12,8 @@ use crate::entities::keybinding::Action;
 use crate::features::keybinding::use_keyboard_action;
 use crate::shared::UseHistory;
 
-/// 新規 Frame のデフォルト duration (ms)
-const DEFAULT_FRAME_DURATION: u32 = 50;
+/// 新規 Frame のデフォルト寿命 (60Hz tick 数 = 約 50ms = 3 tick)。
+const DEFAULT_FRAME_TICKS: u32 = 3;
 
 /// frames の `index` を配列順に揃える。add / delete / move / duplicate のあとに必ず呼ぶ。
 fn renumber_frames(animation: &mut Animation) {
@@ -80,7 +80,7 @@ pub fn AnimationTimeline(
     // use_callback で切り出す。引数 () で副作用のみ。
     let toggle_play_pause = use_callback(move |()| {
         // frames が空の場合は再生不能。Pause も意味がないので no-op。
-        if config.peek().frame_durations.is_empty() {
+        if config.peek().frame_ticks.is_empty() {
             return;
         }
         // peek() の guard が match 中に生き続けると後続の playback.set() と借用衝突するので
@@ -131,7 +131,7 @@ pub fn AnimationTimeline(
         let mut updated = draft();
         let new_frame = Frame {
             index: u32::try_from(updated.frames.len()).unwrap_or(u32::MAX),
-            duration: DEFAULT_FRAME_DURATION,
+            ticks: DEFAULT_FRAME_TICKS,
             flip: None,
             pivot_point_offset: None,
             body_box_overrides: None,

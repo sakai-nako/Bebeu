@@ -53,12 +53,14 @@ enum DragKind {
 }
 
 /// drag を frame に適用する。PanCanvas は呼び出し側で事前に分岐される。
-/// Override box の Move/Resize は state (= Frame.Flip 適用前) 座標で書き戻すため、
-/// 画面 delta (dx, dy) を `invert_drag_delta` で逆 flip してから translate/resize に渡す。
+/// pivot_point_offset / Override box はいずれも state (= Frame.Flip 適用前) 座標で書き戻すため、
+/// 画面 delta (dx, dy) を `invert_drag_delta` で逆 flip してから加算/translate/resize に渡す。
+/// これで Frame.Flip 適用後の見た目とマウス移動方向が一致する。
 fn apply_frame_drag(frame: &mut Frame, kind: &DragKind, dx: i32, dy: i32) {
+    let (sdx, sdy) = invert_drag_delta(frame.flip, dx, dy);
     match kind {
         DragKind::MovePivotOffset { start_offset } => {
-            let next = [start_offset[0] + dx, start_offset[1] + dy];
+            let next = [start_offset[0] + sdx, start_offset[1] + sdy];
             // 全 0 のときは None に正規化（YAML の null と一致、Panel 側のロジックと揃える）
             frame.pivot_point_offset = if next == [0, 0] { None } else { Some(next) };
         }
@@ -67,12 +69,11 @@ fn apply_frame_drag(frame: &mut Frame, kind: &DragKind, dx: i32, dy: i32) {
             start_offset,
         } => {
             if let Some(layer) = frame.layers.iter_mut().find(|l| l.index == *layer_index) {
-                let next = [start_offset[0] + dx, start_offset[1] + dy];
+                let next = [start_offset[0] + sdx, start_offset[1] + sdy];
                 layer.pivot_point_offset = if next == [0, 0] { None } else { Some(next) };
             }
         }
         DragKind::MoveOverrideBox { target, start } => {
-            let (sdx, sdy) = invert_drag_delta(frame.flip, dx, dy);
             frame.replace_override_box(*target, start.translated(sdx, sdy));
         }
         DragKind::ResizeOverrideBox {
@@ -80,7 +81,6 @@ fn apply_frame_drag(frame: &mut Frame, kind: &DragKind, dx: i32, dy: i32) {
             target,
             start,
         } => {
-            let (sdx, sdy) = invert_drag_delta(frame.flip, dx, dy);
             frame.replace_override_box(*target, start.resized(*handle, sdx, sdy));
         }
         DragKind::PanCanvas { .. } => unreachable!("PanCanvas は呼び出し側で事前に分岐される"),
@@ -97,6 +97,10 @@ pub fn AnimationCanvas(
     draft: Signal<Animation>,
     history: UseHistory<Animation>,
     selected_frame_index: ReadSignal<usize>,
+    /// 選択中 Layer の物理 index (= renumber_layers 済みなので layer.index と一致)。
+    /// 各 layer の画像本体 (image bounds) を click で選択 + 同 click から drag で
+    /// その layer の `pivot_point_offset` を編集する。Signal なので書き込みも行う。
+    selected_layer_index: Signal<Option<usize>>,
     selected_box: Signal<Option<SelectedBox>>,
     references: ReadSignal<Vec<SpriteReference>>,
     visibility: Signal<CanvasVisibility>,
@@ -136,7 +140,7 @@ pub fn AnimationCanvas(
     let frame_flip = frame.flip;
     let layers_is_empty = layers.is_empty();
     let frame_index_label = frame.index;
-    let frame_duration_label = frame.duration;
+    let frame_ticks_label = frame.ticks;
 
     let zoom_value = zoom();
     let pan_value = pan();
@@ -161,9 +165,14 @@ pub fn AnimationCanvas(
     // 「pivot 系の drag が起きている = 他の pivot/box は dim する」用のまとめ判定。
     let any_pivot_drag = is_frame_pivot_drag || is_layer_pivot_drag;
 
+    // Canvas root の mousedown: pan bind は最優先、そうでなければ primary click で Frame Pivot
+    // Offset drag を開始する。LayerView / Box overlay / Reference 等の上では各 overlay が
+    // stop_propagation するので、ここに届くのは「空白部分の primary click」だけ → そのまま
+    // Frame Pivot Offset 編集ハンドルとして機能する (marker 自身は表示のみ)。
     let on_canvas_mousedown = {
         let mut selected_box = selected_box;
         let mut dragging = dragging;
+        let mut history = history;
         move |evt: MouseEvent| {
             if let Some((start_pan, start_mouse)) = pan_start_payload(&evt, bindings, *pan.peek()) {
                 dragging.set(Some(DragState::new(
@@ -172,8 +181,22 @@ pub fn AnimationCanvas(
                 )));
                 return;
             }
-            // Primary クリックの素抜けは selection 解除
+            if !is_primary_click(&evt) {
+                return;
+            }
+            // 再生中は編集 drag を開始させない (pan は許可済み)
+            if playback.peek().locks_editing() {
+                return;
+            }
+            // 空白 primary click → Frame Pivot Offset drag を開始。box 選択も一緒に解除。
             selected_box.set(None);
+            history.record();
+            dragging.set(Some(DragState::new(
+                DragKind::MovePivotOffset {
+                    start_offset: frame_offset,
+                },
+                client_xy(&evt),
+            )));
         }
     };
 
@@ -223,29 +246,6 @@ pub fn AnimationCanvas(
         move |_evt: MouseEvent| dragging.set(None)
     };
 
-    let on_pivot_mousedown = {
-        let mut dragging = dragging;
-        let mut history = history;
-        move |evt: MouseEvent| {
-            if !is_primary_click(&evt) {
-                return;
-            }
-            // 再生中は編集 drag を開始させない
-            if playback.peek().locks_editing() {
-                return;
-            }
-            // Canvas root の mousedown が selected_box をクリアするのを止める。
-            evt.stop_propagation();
-            history.record();
-            dragging.set(Some(DragState::new(
-                DragKind::MovePivotOffset {
-                    start_offset: frame_offset,
-                },
-                client_xy(&evt),
-            )));
-        }
-    };
-
     let on_wheel = {
         let mut zoom = zoom;
         move |evt: WheelEvent| {
@@ -272,11 +272,6 @@ pub fn AnimationCanvas(
         "fill-warning"
     } else {
         "fill-primary"
-    };
-    let pivot_cursor_class = if is_frame_pivot_drag {
-        "cursor-grabbing"
-    } else {
-        "cursor-grab"
     };
     // Frame Pivot は Layer Pivot drag や Box drag のときに dim する (主役を譲る)
     let pivot_wrapper_opacity = if is_layer_pivot_drag || any_box_drag {
@@ -338,6 +333,10 @@ pub fn AnimationCanvas(
 
                 // Layers: explicit sizing 構成で各 layer 自身が zoom を扱う。
                 // 元画像外枠 (vis.image_frame) は各 layer の image にぴったり重ねるため LayerView 内で描く。
+                // 各 layer の image bounds は click で選択 + 同 click から drag で
+                // `MoveLayerPivotOffset` を開始する (= sprite pivot dot marker は表示専用に降格)。
+                // Box overlay は後段で描画されるため CSS rendering order で前に来る → Box 上では
+                // Box が pointer events を奪い、自然に「Box の上はドラッグ無効」が成立する。
                 for layer in layers.iter() {
                     LayerView {
                         key: "{layer.index}",
@@ -347,6 +346,10 @@ pub fn AnimationCanvas(
                         frame_flip,
                         zoom: zoom_value,
                         show_frame: vis.image_frame,
+                        is_drag_active: active_layer_pivot == Some(layer.index),
+                        selected_layer_index,
+                        history,
+                        dragging,
                     }
                 }
 
@@ -404,20 +407,39 @@ pub fn AnimationCanvas(
                 if vis.attack_boxes {
                     if let Some(boxes) = attack_overrides.as_ref() {
                         for (i, ab) in boxes.iter().enumerate() {
-                            OverrideBoxOverlay {
-                                key: "ov-attack-{i}",
-                                target: SelectedBox::Attack(i),
-                                hitbox: ab.hitbox.clone(),
-                                frame_offset,
-                                frame_flip,
-                                zoom: zoom_value,
-                                is_selected: selected == Some(SelectedBox::Attack(i)),
-                                dimmed: any_pivot_drag
-                                    || (any_box_drag
-                                        && active_box_target != Some(SelectedBox::Attack(i))),
-                                history,
-                                dragging,
-                                selected_box,
+                            // partial inherit: hitbox=None の場合は sprite[i] の hitbox を
+                            // 各 layer の sprite から取り出して dashed 描画 (= 全 box Inherit
+                            // モードと同じ見た目で「ここは sprite から継承中」を伝える)。
+                            // hitbox=Some の場合は通常通り interactive な OverrideBoxOverlay。
+                            if let Some(hb) = ab.hitbox.clone() {
+                                OverrideBoxOverlay {
+                                    key: "ov-attack-{i}",
+                                    target: SelectedBox::Attack(i),
+                                    hitbox: hb,
+                                    frame_offset,
+                                    frame_flip,
+                                    zoom: zoom_value,
+                                    is_selected: selected == Some(SelectedBox::Attack(i)),
+                                    dimmed: any_pivot_drag
+                                        || (any_box_drag
+                                            && active_box_target != Some(SelectedBox::Attack(i))),
+                                    history,
+                                    dragging,
+                                    selected_box,
+                                }
+                            } else {
+                                for layer in layers.iter() {
+                                    PartialInheritAttackBox {
+                                        key: "partial-inherit-attack-{i}-{layer.index}",
+                                        layer: layer.clone(),
+                                        character: character.clone(),
+                                        box_index: i,
+                                        frame_offset,
+                                        frame_flip,
+                                        zoom: zoom_value,
+                                        dimmed: any_pivot_drag,
+                                    }
+                                }
                             }
                         }
                     }
@@ -466,26 +488,26 @@ pub fn AnimationCanvas(
                     }
                 }
 
-                // Frame Pivot Offset marker: 中央は Layer Pivot dot に明け渡し、腕にホバーで warning 点灯。
-                // wrapper 全体は pointer-events-none、腕の visible 部だけ pointer-events-auto に。
+                // Frame Pivot Offset marker: 表示専用 (drag は Canvas root が拾う)。
+                // pointer-events-none で透過させ、Canvas 空白 drag を妨げない。drag 中だけ
+                // fill が warning に切り替わる (Layer Pivot drag / Box drag 中は dim)。
                 if vis.frame_pivot {
                     svg {
-                        class: "group absolute pointer-events-none {pivot_wrapper_opacity}",
+                        class: "absolute pointer-events-none {pivot_wrapper_opacity}",
                         style: "left: {frame_pivot_marker_x}px; top: {frame_pivot_marker_y}px; transform: translate(-50%, -50%); overflow: visible;",
                         width: "28",
                         height: "28",
                         view_box: "0 0 28 28",
-                        "aria-label": "Frame Pivot Offset (drag で移動)",
-                        onmousedown: on_pivot_mousedown,
+                        "aria-label": "Frame Pivot Offset (canvas の空白を drag で移動)",
                         rect {
-                            class: "pointer-events-auto transition-colors group-hover:fill-warning {pivot_cursor_class} {pivot_fill_class}",
+                            class: "{pivot_fill_class}",
                             x: "12",
                             y: "0",
                             width: "4",
                             height: "28",
                         }
                         rect {
-                            class: "pointer-events-auto transition-colors group-hover:fill-warning {pivot_cursor_class} {pivot_fill_class}",
+                            class: "{pivot_fill_class}",
                             x: "0",
                             y: "12",
                             width: "28",
@@ -494,8 +516,9 @@ pub fn AnimationCanvas(
                     }
                 }
 
-                // Sprite pivot markers (interactive): viewport wrapper 内に置くので pan は自動追従。
-                // 各 layer の (frame_offset + layer_offset) * zoom + zoom/2 が pivot 画素中央 CSS。
+                // Sprite pivot markers: 表示専用 (drag は LayerView の image overlay が拾う)。
+                // viewport wrapper 内に置くので pan は自動追従。各 layer の
+                // (frame_offset + layer_offset) * zoom + zoom/2 が pivot 画素中央 CSS。
                 if vis.layer_pivot {
                     for layer in layers.iter() {
                         SpritePivotMarker {
@@ -507,13 +530,10 @@ pub fn AnimationCanvas(
                                 * zoom_value
                                 + marker_center_offset,
                             layer_index: layer.index,
-                            layer_offset: layer.pivot_point_offset.unwrap_or([0, 0]),
                             is_active: active_layer_pivot == Some(layer.index),
                             dimmed: is_frame_pivot_drag
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            || any_box_drag
+                                || any_box_drag
                                 || (is_layer_pivot_drag && active_layer_pivot != Some(layer.index)),
-                            history,
-                            dragging,
                         }
                     }
                 }
@@ -523,7 +543,7 @@ pub fn AnimationCanvas(
             // CanvasVisibilityBar は session 内のみで永続化しない（references と同じ扱い）。
             div { class: "absolute top-2 left-2 flex items-center gap-2",
                 div { class: "badge badge-neutral badge-sm font-mono",
-                    "Frame #{frame_index_label} · {frame_duration_label}ms"
+                    "Frame #{frame_index_label} · {frame_ticks_label} tick"
                 }
                 CanvasVisibilityBar {
                     visibility,
@@ -551,7 +571,14 @@ fn LayerView(
     zoom: f64,
     /// 元画像の外枠 (image dimensions の矩形) を image にぴったり重ねて描くか。
     show_frame: bool,
+    /// この layer の Layer Pivot drag が進行中か。cursor を grabbing にするだけに使う。
+    is_drag_active: bool,
+    /// 共有の selected layer signal。image overlay の click で `Some(layer.index)` を書く。
+    selected_layer_index: Signal<Option<usize>>,
+    history: UseHistory<Animation>,
+    dragging: Signal<Option<DragState>>,
 ) -> Element {
+    let playback = use_playback();
     let resolved = character.find_sprite(layer.sprite_group_number, layer.sprite_index);
     let Some((group, sprite)) = resolved else {
         return rsx! {
@@ -602,6 +629,42 @@ fn LayerView(
 
     let opacity = layer.transparency.clamp(0.0, 1.0);
 
+    // image bounds に overlay div を常時被せて、click=layer 選択 + drag=Layer Pivot Offset 編集
+    // を兼用する。dimensions = None (image 解決不能) のときは width/height = 0 なので実質発火しない。
+    let layer_index = layer.index;
+    let start_offset = layer.pivot_point_offset.unwrap_or([0, 0]);
+    let on_image_mousedown = {
+        let mut dragging = dragging;
+        let mut history = history;
+        let mut selected_layer_index = selected_layer_index;
+        move |evt: MouseEvent| {
+            if !is_primary_click(&evt) {
+                return;
+            }
+            if playback.peek().locks_editing() {
+                return;
+            }
+            // Canvas root の Frame Pivot drag を抑止 + Box selection 維持。
+            evt.stop_propagation();
+            // 未選択ならまずこの layer を選択 (drag せず離してもこの選択は残る)。
+            // 選択済みのときは set 自体が同値で no-op (= 再 render しない)。
+            selected_layer_index.set(Some(layer_index as usize));
+            history.record();
+            dragging.set(Some(DragState::new(
+                DragKind::MoveLayerPivotOffset {
+                    layer_index,
+                    start_offset,
+                },
+                client_xy(&evt),
+            )));
+        }
+    };
+    let overlay_cursor = if is_drag_active {
+        "cursor-grabbing"
+    } else {
+        "cursor-grab"
+    };
+
     rsx! {
         div {
             class: "absolute pointer-events-none",
@@ -622,6 +685,15 @@ fn LayerView(
                     class: "absolute pointer-events-none box-border border border-dashed border-base-content/60",
                     style: "left: {dx_zoomed}px; top: {dy_zoomed}px; width: {img_w_zoomed}px; height: {img_h_zoomed}px; transform: {layer_scale}; transform-origin: {sprite_pivot_origin_x}px {sprite_pivot_origin_y}px;",
                 }
+            }
+
+            // image bounds の click/drag 拾い overlay (常時)。click で layer 選択 + 同 click から
+            // drag で Layer Pivot Offset 編集。img と同じ位置・transform で重ねる
+            // (Box overlay は後段で描かれるので CSS rendering 順で前に来る → Box 上は Box が拾う)。
+            div {
+                class: "absolute pointer-events-auto {overlay_cursor}",
+                style: "left: {dx_zoomed}px; top: {dy_zoomed}px; width: {img_w_zoomed}px; height: {img_h_zoomed}px; transform: {layer_scale}; transform-origin: {sprite_pivot_origin_x}px {sprite_pivot_origin_y}px;",
+                onmousedown: on_image_mousedown,
             }
         }
     }
@@ -686,6 +758,56 @@ fn InheritLayerBoxes(
                 opacity_class: opacity_class.to_string(),
                 label: format!("{label_prefix}{i}"),
             }
+        }
+    }
+}
+
+/// `AttackBoxOverride.hitbox == None` (= sprite から hitbox 継承中、partial inherit) の
+/// box について、各 layer の sprite から該当 index の hitbox を取り出して dashed 描画する。
+/// `InheritLayerBoxes` の attack-1-box 限定版。box 数 / layer 構成によっては該当 box が
+/// 存在しないこともあり (sprite に対応 index の box が無い場合)、その場合は何も描画しない。
+#[component]
+fn PartialInheritAttackBox(
+    layer: Layer,
+    character: Character,
+    box_index: usize,
+    frame_offset: [i32; 2],
+    frame_flip: Option<FlipMode>,
+    zoom: f64,
+    dimmed: bool,
+) -> Element {
+    let Some((_group, sprite)) =
+        character.find_sprite(layer.sprite_group_number, layer.sprite_index)
+    else {
+        return rsx! {};
+    };
+    let Some(boxes) = sprite.attack_boxes.as_ref() else {
+        return rsx! {};
+    };
+    let Some(ab) = boxes.get(box_index) else {
+        return rsx! {};
+    };
+
+    let layer_offset = layer.pivot_point_offset.unwrap_or([0, 0]);
+    let kind = BoxKind::Attack;
+    let color_class = kind.inherit_box_classes();
+    let label_prefix = kind.label_prefix();
+    let opacity_class = if dimmed { "opacity-50" } else { "" };
+
+    rsx! {
+        InheritBoxOverlay {
+            hitbox: resolve_inherit_box_in_frame(
+                &ab.hitbox,
+                sprite.pivot_point,
+                layer_offset,
+                layer.flip,
+                frame_flip,
+            ),
+            frame_offset,
+            zoom,
+            color_class: color_class.to_string(),
+            opacity_class: opacity_class.to_string(),
+            label: format!("{label_prefix}{box_index}"),
         }
     }
 }
@@ -810,15 +932,12 @@ fn OverrideBoxOverlay(
     }
 }
 
-/// 各 Layer の Sprite pivot を canvas 上に表示する drag 可能な dot マーカー。
-/// 中央 dot (10x10 secondary 円) に対する mousedown で `MoveLayerPivotOffset` drag を始める。
-/// Frame Pivot marker (cross + 中央円, primary) と重なるケース (layer_offset=0) でも、
-/// dot の外側に露出する Frame marker の cross の腕は引き続き Frame Pivot drag のターゲットになる。
-/// Sprite pivot 自体の値 (sprite.pivot_point) の編集は SpriteGroupEditor で行う点は変わらない。
+/// 各 Layer の Sprite pivot を canvas 上に示すマーカー (表示専用)。
+/// drag による pivot offset 編集は LayerView の image overlay が拾うため、ここは pointer-events-none。
+/// is_active = この layer の Layer Pivot drag が進行中、で fill を warning に切り替えるのみ。
 ///
 /// 4K (高 DPI) ディスプレイで subpixel 位置が device pixel grid に合わず、frame ごとに
 /// ブラウザが違う方向に pixel-snap して見える問題を避けるため、SVG で描く。
-/// hover 時の warning ring は SVG 内にもう一段 circle を重ねて疑似実装する。
 #[component]
 fn SpritePivotMarker(
     /// viewport wrapper の child 座標における marker 中心の (x, y) CSS px。
@@ -826,67 +945,25 @@ fn SpritePivotMarker(
     child_x: f64,
     child_y: f64,
     layer_index: u32,
-    layer_offset: [i32; 2],
     is_active: bool,
     dimmed: bool,
-    mut history: UseHistory<Animation>,
-    mut dragging: Signal<Option<DragState>>,
 ) -> Element {
-    let playback = use_playback();
     let fill_class = if is_active {
         "fill-warning"
     } else {
         "fill-secondary"
     };
-    let cursor_class = if is_active {
-        "cursor-grabbing"
-    } else {
-        "cursor-grab"
-    };
     let opacity_class = if dimmed { "opacity-40" } else { "" };
 
-    let on_mousedown = move |evt: MouseEvent| {
-        if !is_primary_click(&evt) {
-            return;
-        }
-        // 再生中は Layer Pivot drag を開始させない
-        if playback.peek().locks_editing() {
-            return;
-        }
-        // Canvas root の deselect と Frame Pivot drag を抑止し、Layer Pivot drag を始める。
-        evt.stop_propagation();
-        history.record();
-        dragging.set(Some(DragState::new(
-            DragKind::MoveLayerPivotOffset {
-                layer_index,
-                start_offset: layer_offset,
-            },
-            client_xy(&evt),
-        )));
-    };
-
-    // SVG box は dot と同じ 10x10 にして hit-test 領域を旧実装と揃え、hover ring は
-    // overflow: visible でその外側に描く (旧 hover:ring-2 hover:ring-offset-1 と同等)。
-    // - dot 本体: r=4 fill + stroke 2px が r=3..5 にかぶさり、fill 直径 6 + ring 2px = 直径 10 outer
-    // - hover ring: r=7 stroke=warning width=2 → 外径 16、dot との 1px gap (= ring-offset-1 相当)
     rsx! {
         svg {
-            class: "absolute pointer-events-auto group {cursor_class} {opacity_class}",
+            class: "absolute pointer-events-none {opacity_class}",
             style: "left: {child_x}px; top: {child_y}px; transform: translate(-50%, -50%); overflow: visible;",
             width: "10",
             height: "10",
             view_box: "0 0 10 10",
-            "aria-label": "Layer #{layer_index} pivot offset (drag で移動)",
-            onmousedown: on_mousedown,
-            // 外周 hover ring: 通常時は不可視、hover 時のみ warning で表示。viewBox 外まで延びる。
-            circle {
-                class: "fill-transparent stroke-warning opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none",
-                cx: "5",
-                cy: "5",
-                r: "7",
-                stroke_width: "2",
-            }
-            // dot 本体: 10x10 outer (= 旧 div の box)、6x6 fill 内側、2px base-100 ring
+            "aria-label": "Layer #{layer_index} pivot offset",
+            // dot 本体: 10x10 outer、6x6 fill 内側、2px base-100 ring
             circle {
                 class: "{fill_class} stroke-base-100",
                 cx: "5",

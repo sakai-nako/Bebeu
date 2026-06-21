@@ -141,6 +141,14 @@ pub struct SpriteEntry {
     /// 「画像のここを char_pos に重ねる」基準点。
     #[serde(default)]
     pub pivot_point: [i32; 2],
+    /// 被弾判定 box の **メイン**。Frame.body_box_overrides が None (Inherit) のときは
+    /// この値が使われる。editor 側の Sprite.body_boxes と同じ schema。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_boxes: Option<Vec<HitBox>>,
+    /// 攻撃判定 box の **メイン**。Frame.attack_box_overrides が None (Inherit) のときは
+    /// この値が使われる。editor 側の Sprite.attack_boxes と同じ schema。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_boxes: Option<Vec<AttackBox>>,
 }
 
 // === Animation / Frame / Layer ===
@@ -168,9 +176,12 @@ pub struct Animation {
 pub struct Frame {
     #[serde(default)]
     pub index: u32,
-    /// ms 単位。0 のときは Default フレーム長 (engine 側で別途決める) を使うことを想定。
+    /// 60Hz vsync tick (= 1/60 秒) 単位。例: `7` で 7 tick = 約 116.67 ms。
+    /// 0 のときは Default フレーム長 (engine 側で別途決める) を使うことを想定。
+    /// **データモデル上の唯一の時間単位**で、engine / editor / animation export
+    /// 全てがこの tick を 1 級概念として扱う (ms 概念は持ち込まない)。
     #[serde(default)]
-    pub duration: u32,
+    pub ticks: u32,
     /// frame レベルの反転 (frame 全体を反転)。`null` で反転なし。
     #[serde(default)]
     pub flip: Option<FlipMode>,
@@ -179,6 +190,111 @@ pub struct Frame {
     pub pivot_point_offset: Option<[i32; 2]>,
     #[serde(default)]
     pub layers: Vec<Layer>,
+    /// この frame で active な攻撃判定 box の上書き列。editor 側の 3-state と互換:
+    /// `None`=Inherit (上位 SpriteEntry.attack_boxes に従う)、`Some(empty)`=Disable
+    /// (攻撃判定なし)、`Some(non-empty)`=Override (この frame の box を使う)。
+    /// 各 [`AttackBoxOverride`] 要素は hitbox / meta を個別に Option で持ち、None の field は
+    /// sprite 側の同じ index の要素から継承する (`battle::resolve_attack_box` で merge)。
+    #[serde(default)]
+    pub attack_box_overrides: Option<Vec<AttackBoxOverride>>,
+    /// この frame で active な被弾判定 box の上書き列。`attack_box_overrides` と同じ
+    /// 3-state で、`None`=Inherit (`SpriteEntry.body_boxes` を継承)。
+    #[serde(default)]
+    pub body_box_overrides: Option<Vec<HitBox>>,
+}
+
+// === AttackBox / HitBox / AttackBoxMeta / KnockbackVec ===
+// editor 側 (packages/editor-desktop/src/shared/collision.rs) と YAML 上互換になるよう
+// フィールド名・形を揃える。engine は読み取り専用なので resize 系 helper は持たない。
+
+/// `AttackBoxMeta.knockback` が保持する吹っ飛び速度ベクトル。
+/// `vel_x` の符号は「攻撃側の前方向 = +」(scene 側で `Facing` を見て符号反転する)。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct KnockbackVec {
+    #[serde(default)]
+    pub vel_x: f32,
+    #[serde(default)]
+    pub vel_y: f32,
+    #[serde(default)]
+    pub vel_z: f32,
+}
+
+/// 攻撃の効果データ。geometry (HitBox) と分離して、ダメージ / Knockback ゲージ削り /
+/// 吹っ飛びベクトル / hit_stop 演出を表す (ADR-0024)。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AttackBoxMeta {
+    pub damage: u32,
+    pub knockback_damage: u32,
+    pub knockback: KnockbackVec,
+    /// hit が決まった瞬間に発生する time freeze + sprite 揺らし演出。`None` で hit_stop なし
+    /// (= 即座に通常の Hit state へ遷移)。詳細は [`HitStop`]。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hit_stop: Option<HitStop>,
+}
+
+/// hit 瞬間の time freeze + visual shake 演出パラメータ。攻撃側 frame の meta に置く
+/// (= 攻撃の重さ・性質で決まる)。被弾側 sprite には三角波の shake が visual offset と
+/// して乗り、その間 attacker / victim 両方の Animation 進行と CharacterState 遷移が
+/// freeze される。world position は不動。
+///
+/// 軸の取り方:
+/// - `shake_x`: キャラ向きの **前方** が +、後方が - (world X)。1 片道目の方向。
+/// - `shake_y`: 画面上が +、画面下が - (world Y)。1 片道目の方向。
+///
+/// 三角波: `count` = 片道回数 (= 中心 ↔ ±max を 1 と数える)。1 = 中心 → +max で終了
+/// (= 旧 impact 単発相当)、2 = 中心 → +max → 中心、4 = 1 周期 (中心 → +max → 中心 →
+/// -max → 中心)。`decay` で振幅を線形に減衰させる。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HitStop {
+    /// hit_stop の継続時間 (ms)。`None` のときは被弾側 Hit アニメ frame 0 の duration が
+    /// そのまま使われる (= 被弾側固有値、ザコ vs ボス で揺れ時間を変えたい場合用の fallback)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u32>,
+    /// shake の初期振幅 (px)。三角波の中心は 0、振幅は ±shake_x / ±shake_y。
+    pub shake_x: i32,
+    pub shake_y: i32,
+    /// 片道回数。0 で shake なし。
+    pub count: u32,
+    /// shake 振幅の線形減衰率。`amplitude(progress) = shake * (1 - decay * progress).clamp(0, 1)`。
+    /// 0.0 で振幅一定、1.0 で末尾の振幅 0。
+    pub decay: f32,
+}
+
+/// 画像 pixel 座標で表された矩形 + 奥行き厚み (world Z)。
+/// `top_left` / `bottom_right` は sprite 画像内ローカル座標、`depth` は world Z の全幅。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HitBox {
+    pub top_left: [i32; 2],
+    pub bottom_right: [i32; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+}
+
+/// AttackBox = HitBox (幾何) + AttackBoxMeta (効果)。editor が serialize する新形式
+/// (`{ hitbox: {...}, meta: {...} }`) を読む。旧形式 (HitBox 直接) は editor 側で
+/// 新形式に migrate される前提で、engine 側では新形式のみ受ける。
+/// sprite 側 (`SpriteEntry.attack_boxes`) のソース。`hitbox` は必須、`meta` のみ optional。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttackBox {
+    pub hitbox: HitBox,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AttackBoxMeta>,
+}
+
+/// `Frame.attack_box_overrides` の各要素。`hitbox` / `meta` を個別に Option で持ち、None の
+/// field は sprite 側 (`SpriteEntry.attack_boxes`) の同じ index の要素から継承する。
+/// 両方 Some なら sprite を完全に上書き、両方 None なら何もしない (= sprite をそのまま使う)。
+/// YAML 互換: 既存 editor が書く `{ hitbox: {...}, meta: {...} }` の形 (両方 Some) は
+/// そのまま deserialize できる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AttackBoxOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hitbox: Option<HitBox>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AttackBoxMeta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -293,5 +409,176 @@ mod tests {
     fn animation_default_role_is_custom() {
         let a = Animation::default();
         assert_eq!(a.role, Role::Custom);
+    }
+
+    #[test]
+    fn hit_stop_default_is_zero_offsets() {
+        let hs = HitStop::default();
+        assert_eq!(hs.duration_ms, None);
+        assert_eq!(hs.shake_x, 0);
+        assert_eq!(hs.shake_y, 0);
+        assert_eq!(hs.count, 0);
+        assert!((hs.decay - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn attack_box_meta_with_hit_stop_round_trip() -> anyhow::Result<()> {
+        let yaml = r"
+damage: 30
+hit_stop:
+  duration_ms: 120
+  shake_x: 2
+  shake_y: 4
+  count: 3
+  decay: 0.5
+";
+        let meta: AttackBoxMeta = serde_saphyr::from_str(yaml)?;
+        assert_eq!(meta.damage, 30);
+        let hs = meta.hit_stop.expect("hit_stop should be present");
+        assert_eq!(hs.duration_ms, Some(120));
+        assert_eq!(hs.shake_x, 2);
+        assert_eq!(hs.shake_y, 4);
+        assert_eq!(hs.count, 3);
+        assert!((hs.decay - 0.5).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn attack_box_meta_without_hit_stop_field_yields_none() -> anyhow::Result<()> {
+        // 既存 YAML (hit_stop なし) は meta.hit_stop = None で互換的に読める。
+        let yaml = r"
+damage: 30
+knockback_damage: 5
+";
+        let meta: AttackBoxMeta = serde_saphyr::from_str(yaml)?;
+        assert_eq!(meta.damage, 30);
+        assert!(meta.hit_stop.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn hit_stop_without_duration_ms_field_defaults_to_none() -> anyhow::Result<()> {
+        // duration_ms 省略時は被弾側 Hit アニメ frame 0 duration にフォールバックさせるため None。
+        let yaml = r"
+shake_x: 1
+count: 2
+";
+        let hs: HitStop = serde_saphyr::from_str(yaml)?;
+        assert_eq!(hs.duration_ms, None);
+        assert_eq!(hs.shake_x, 1);
+        assert_eq!(hs.count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn attack_box_round_trip_with_meta() -> anyhow::Result<()> {
+        let yaml = r"
+hitbox:
+  top_left: [10, 20]
+  bottom_right: [30, 40]
+  depth: 12
+meta:
+  damage: 40
+  knockback_damage: 30
+  knockback:
+    vel_x: 120.0
+    vel_y: 80.0
+    vel_z: 0.0
+";
+        let ab: AttackBox = serde_saphyr::from_str(yaml)?;
+        assert_eq!(ab.hitbox.top_left, [10, 20]);
+        assert_eq!(ab.hitbox.bottom_right, [30, 40]);
+        assert_eq!(ab.hitbox.depth, Some(12));
+        let meta = ab.meta.expect("meta should be present");
+        assert_eq!(meta.damage, 40);
+        assert_eq!(meta.knockback_damage, 30);
+        assert!((meta.knockback.vel_x - 120.0).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn attack_box_without_meta_deserializes() -> anyhow::Result<()> {
+        let yaml = r"
+hitbox:
+  top_left: [0, 0]
+  bottom_right: [10, 10]
+";
+        let ab: AttackBox = serde_saphyr::from_str(yaml)?;
+        assert!(ab.meta.is_none());
+        assert_eq!(ab.hitbox.depth, None);
+        Ok(())
+    }
+
+    #[test]
+    fn frame_attack_box_overrides_round_trip() -> anyhow::Result<()> {
+        // 既存 editor が書く形 (hitbox / meta 両方あり) の YAML 互換性を維持する。
+        let yaml = r"
+index: 1
+ticks: 10
+attack_box_overrides:
+- hitbox:
+    top_left: [18, 28]
+    bottom_right: [42, 48]
+  meta:
+    damage: 40
+layers: []
+";
+        let frame: Frame = serde_saphyr::from_str(yaml)?;
+        let overrides = frame
+            .attack_box_overrides
+            .as_ref()
+            .expect("overrides should be present");
+        assert_eq!(overrides.len(), 1);
+        let hb = overrides[0]
+            .hitbox
+            .as_ref()
+            .expect("hitbox should be present");
+        assert_eq!(hb.top_left, [18, 28]);
+        assert_eq!(
+            overrides[0]
+                .meta
+                .as_ref()
+                .expect("meta should be present")
+                .damage,
+            40
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn attack_box_override_hitbox_only_omits_meta() -> anyhow::Result<()> {
+        // partial override: hitbox だけ書く (meta は sprite から継承される想定)。
+        let yaml = r"
+hitbox:
+  top_left: [10, 20]
+  bottom_right: [30, 40]
+";
+        let ov: AttackBoxOverride = serde_saphyr::from_str(yaml)?;
+        assert!(ov.hitbox.is_some());
+        assert!(ov.meta.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn attack_box_override_meta_only_omits_hitbox() -> anyhow::Result<()> {
+        // partial override: meta だけ書く (hitbox は sprite から継承される想定)。
+        let yaml = r"
+meta:
+  damage: 75
+";
+        let ov: AttackBoxOverride = serde_saphyr::from_str(yaml)?;
+        assert!(ov.hitbox.is_none());
+        assert_eq!(ov.meta.expect("meta should be present").damage, 75);
+        Ok(())
+    }
+
+    #[test]
+    fn attack_box_override_empty_object_is_noop() -> anyhow::Result<()> {
+        // 両方 None: sprite を上書きしない (= sprite をそのまま使う)。
+        let yaml = "{}";
+        let ov: AttackBoxOverride = serde_saphyr::from_str(yaml)?;
+        assert!(ov.hitbox.is_none());
+        assert!(ov.meta.is_none());
+        Ok(())
     }
 }

@@ -5,30 +5,54 @@ is_loop: true
 loop_start_index: 0
 frames:
 - index: 0
-  duration: 150
+  ticks: 9
+  flip: null
+  pivot_point_offset: null
+  body_box_overrides: null
+  attack_box_overrides: null
   layers:
   - index: 0
     sprite_group_number: 1
     sprite_index: 0
     transparency: 1.0
+    flip: null
+    pivot_point_offset: null
 - index: 1
-  duration: 150
+  ticks: 9
+  flip: null
+  pivot_point_offset: null
+  body_box_overrides: null
+  attack_box_overrides: null
   layers:
   - index: 0
     sprite_group_number: 1
     sprite_index: 1
     transparency: 1.0
+    flip: null
+    pivot_point_offset: null
 - index: 2
-  duration: 150
+  ticks: 9
+  flip: null
+  pivot_point_offset: null
+  body_box_overrides: null
+  attack_box_overrides: null
   layers:
   - index: 0
     sprite_group_number: 1
     sprite_index: 0
     transparency: 1.0
+    flip: null
+    pivot_point_offset: null
 - index: 3
-  duration: 150
+  ticks: 9
+  flip: null
+  pivot_point_offset: null
+  body_box_overrides: null
+  attack_box_overrides: null
   layers:
   - index: 0
     sprite_group_number: 1
     sprite_index: 2
     transparency: 1.0
+    flip: null
+    pivot_point_offset: null

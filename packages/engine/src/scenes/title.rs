@@ -16,10 +16,7 @@ fn setup() {
     tracing::info!("title: enter");
 }
 
-fn advance(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut next: ResMut<NextState<SceneState>>,
-) {
+fn advance(keyboard: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<SceneState>>) {
     if keyboard.just_pressed(KeyCode::Enter) || keyboard.just_pressed(KeyCode::Space) {
         next.set(SceneState::Battle);
     }

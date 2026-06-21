@@ -56,6 +56,9 @@ fn write_character(root: &Path, name: &str, palette: &CharacterPalette) -> Resul
     write_sprite(&base, "walk", 1, 0, palette)?;
     write_sprite(&base, "walk", 2, 1, palette)?;
     write_sprite(&base, "walk", 3, 2, palette)?;
+    write_sprite(&base, "attack", 1, 0, palette)?;
+    write_sprite(&base, "attack", 2, 1, palette)?;
+    write_sprite(&base, "hit", 1, 0, palette)?;
     write_sprite(&base, "thumbnail", 1, 0, palette)?;
     Ok(())
 }
@@ -72,7 +75,11 @@ fn write_sprite(
         .join(group)
         .join("sprites");
     let path = dir.join(format!("{index:03}.png"));
-    let pixels = render_character_sprite(palette, phase);
+    let pixels = match group {
+        "attack" => render_attack_sprite(palette, phase),
+        "hit" => render_hit_sprite(palette),
+        _ => render_character_sprite(palette, phase),
+    };
     write_png(&path, SPRITE_W, SPRITE_H, &pixels)
         .with_context(|| format!("write sprite: {}", path.display()))
 }
@@ -99,6 +106,45 @@ fn render_character_sprite(palette: &CharacterPalette, phase: u32) -> Vec<u8> {
     fill_rect(&mut buf, 26 + leg, 60, 6, 28, palette.body);
     fill_rect(&mut buf, 10 - leg, 32 + bob, 4, 24, palette.body);
     fill_rect(&mut buf, 34 + leg, 32 + bob, 4, 24, palette.body);
+
+    buf
+}
+
+/// 攻撃 sprite。phase 0 = 構え、phase 1 = 前方に拳を突き出す。
+/// 右向き前提で描き、左向きは `Sprite.flip_x` で対応する。
+fn render_attack_sprite(palette: &CharacterPalette, phase: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    let extend: i32 = if phase == 0 { 0 } else { 10 };
+
+    fill_rect(&mut buf, 16, 12, 16, 16, palette.head);
+    fill_rect(&mut buf, 14, 28, 20, 32, palette.body);
+    fill_rect(&mut buf, 14, 54, 20, 4, palette.accent);
+    fill_rect(&mut buf, 14, 60, 6, 28, palette.body);
+    fill_rect(&mut buf, 28, 60, 6, 28, palette.body);
+    // 引き手 (左腕)
+    fill_rect(&mut buf, 10, 32, 4, 20, palette.body);
+    // 突き手 (右腕): phase で前方に伸びる
+    fill_rect(&mut buf, 34, 34, 4 + extend, 6, palette.body);
+    fill_rect(&mut buf, 38 + extend, 32, 4, 10, palette.accent);
+
+    buf
+}
+
+/// 被弾 sprite。のけぞって体が沈み、頭が後ろ (右向き前提なので画面左) へ流れる。
+/// 左向きは `Sprite.flip_x` 経由でそのまま反転される。
+fn render_hit_sprite(palette: &CharacterPalette) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    let body_dy: i32 = 3; // 衝撃で少し沈み込む
+    let head_dx: i32 = -3; // 頭が後ろに振れる
+
+    fill_rect(&mut buf, 16 + head_dx, 14, 16, 16, palette.head);
+    fill_rect(&mut buf, 14, 28 + body_dy, 20, 30, palette.body);
+    fill_rect(&mut buf, 14, 54 + body_dy, 20, 4, palette.accent);
+    fill_rect(&mut buf, 14, 60, 6, 28, palette.body);
+    fill_rect(&mut buf, 28, 60, 6, 28, palette.body);
+    // 両腕、衝撃で広がる
+    fill_rect(&mut buf, 4, 32 + body_dy, 6, 16, palette.body);
+    fill_rect(&mut buf, 38, 32 + body_dy, 6, 16, palette.body);
 
     buf
 }

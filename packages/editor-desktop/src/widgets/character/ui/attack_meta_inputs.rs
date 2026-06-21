@@ -1,4 +1,4 @@
-//! AttackBox の meta (Damage / KnockbackDamage / HitstunExtra / Knockback Vec3) を編集する
+//! AttackBox の meta (Damage / KnockbackDamage / Knockback Vec3 / HitStop) を編集する
 //! 共通コンポーネント。
 //!
 //! Sprite の attack box editor (sprite_property_panel) と Frame override 用 BoxRow
@@ -12,7 +12,7 @@
 
 use dioxus::prelude::*;
 
-use crate::shared::{AttackBoxMeta, KnockbackVec};
+use crate::shared::{AttackBoxMeta, HitStop, KnockbackVec};
 
 /// AttackBox.meta を編集する 6 input 群。
 ///
@@ -38,8 +38,11 @@ pub(super) fn AttackMetaInputs(
         on_change.call(normalized);
     };
 
-    let input_class = "input input-bordered input-xs w-16";
+    let input_class = "input input-bordered input-xs w-14";
     let label_class = "text-xs text-base-content/70";
+    // grid 行のラベル列 (左) と値列 (右) の共通 class。値列は内部で flex-wrap 可。
+    let row_label_class = "text-xs font-semibold text-base-content/80 self-center";
+    let row_values_class = "flex flex-wrap items-center gap-2";
 
     let on_damage = move |evt: Event<FormData>| {
         if let Ok(v) = evt.value().trim().parse::<u32>() {
@@ -53,14 +56,6 @@ pub(super) fn AttackMetaInputs(
         if let Ok(v) = evt.value().trim().parse::<u32>() {
             apply(AttackBoxMeta {
                 knockback_damage: v,
-                ..current
-            });
-        }
-    };
-    let on_hitstun = move |evt: Event<FormData>| {
-        if let Ok(v) = evt.value().trim().parse::<u32>() {
-            apply(AttackBoxMeta {
-                hitstun_extra_ms: v,
                 ..current
             });
         }
@@ -99,71 +94,227 @@ pub(super) fn AttackMetaInputs(
         }
     };
 
+    // hit_stop 入力: 全 field が default なら meta.hit_stop = None、何か入力されれば Some に。
+    // 既存 AttackBoxMeta の正規化と整合させる。
+    let current_hs = current.hit_stop.unwrap_or_default();
+    let apply_hit_stop = move |next_hs: HitStop| {
+        let next_meta = AttackBoxMeta {
+            hit_stop: if next_hs == HitStop::default() {
+                None
+            } else {
+                Some(next_hs)
+            },
+            ..current
+        };
+        apply(next_meta);
+    };
+
+    // duration_ms は Option<u32> なので空文字で None / 数字で Some。
+    let on_hs_duration = move |evt: Event<FormData>| {
+        let raw = evt.value();
+        let next_duration = if raw.trim().is_empty() {
+            None
+        } else if let Ok(v) = raw.trim().parse::<u32>() {
+            Some(v)
+        } else {
+            return;
+        };
+        apply_hit_stop(HitStop {
+            duration_ms: next_duration,
+            ..current_hs
+        });
+    };
+    let on_hs_shake_x = move |evt: Event<FormData>| {
+        if let Ok(v) = evt.value().trim().parse::<i32>() {
+            apply_hit_stop(HitStop {
+                shake_x: v,
+                ..current_hs
+            });
+        }
+    };
+    let on_hs_shake_y = move |evt: Event<FormData>| {
+        if let Ok(v) = evt.value().trim().parse::<i32>() {
+            apply_hit_stop(HitStop {
+                shake_y: v,
+                ..current_hs
+            });
+        }
+    };
+    let on_hs_count = move |evt: Event<FormData>| {
+        if let Ok(v) = evt.value().trim().parse::<u32>() {
+            apply_hit_stop(HitStop {
+                count: v,
+                ..current_hs
+            });
+        }
+    };
+    let on_hs_decay = move |evt: Event<FormData>| {
+        if let Ok(v) = evt.value().trim().parse::<f32>() {
+            // 0..=1 の範囲想定だが clamp は engine 側で行うので、ここでは入力をそのまま流す。
+            apply_hit_stop(HitStop {
+                decay: v,
+                ..current_hs
+            });
+        }
+    };
+
+    // duration_ms 表示用 (None なら空欄)。
+    let hs_duration_value = current_hs
+        .duration_ms
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+
+    // ラベル + input の各ペアを内部 div で囲み、flex-wrap で折り返したときに
+    // 「ラベルだけ前行末、input は次行頭」と分断されないようにする。各ペアは
+    // 1 つの flex item として扱われるので一緒に折り返される。
+    let pair_class = "flex items-center gap-1";
+    // 各セクションは「見出し (上) → 値群 (下) の改行構成」。狭い panel 幅でも見出しと値が
+    // 縦に重ならず読める。値群は内部で flex-wrap 可。
     rsx! {
-        div { class: "space-y-1",
-            div { class: "flex flex-wrap items-center gap-1",
-                span { class: "{label_class}", title: "HP 減算量", "DMG" }
-                input {
-                    r#type: "number",
-                    class: "{input_class}",
-                    min: "0",
-                    value: "{current.damage}",
-                    onchange: on_damage,
-                }
-                span {
-                    class: "{label_class}",
-                    title: "Knockback ゲージ減算量",
-                    "KBD"
-                }
-                input {
-                    r#type: "number",
-                    class: "{input_class}",
-                    min: "0",
-                    value: "{current.knockback_damage}",
-                    onchange: on_kb_damage,
-                }
-                span {
-                    class: "{label_class}",
-                    title: "Hit Animation 長への追加硬直 (ms)",
-                    "+Hit"
-                }
-                input {
-                    r#type: "number",
-                    class: "{input_class}",
-                    min: "0",
-                    value: "{current.hitstun_extra_ms}",
-                    onchange: on_hitstun,
+        div { class: "space-y-2",
+            // --- Damage section ---
+            div { class: "space-y-1",
+                h4 { class: "{row_label_class}", title: "ダメージ系", "Damage" }
+                div { class: "{row_values_class}",
+                    div { class: "{pair_class}",
+                        span { class: "{label_class}", title: "HP 減算量", "DMG" }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            min: "0",
+                            value: "{current.damage}",
+                            onchange: on_damage,
+                        }
+                    }
+                    div { class: "{pair_class}",
+                        span {
+                            class: "{label_class}",
+                            title: "Knockback ゲージ減算量",
+                            "KBD"
+                        }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            min: "0",
+                            value: "{current.knockback_damage}",
+                            onchange: on_kb_damage,
+                        }
+                    }
                 }
             }
-            div { class: "flex flex-wrap items-center gap-1",
-                span {
-                    class: "{label_class}",
+
+            // --- Knockback section ---
+            div { class: "space-y-1",
+                h4 {
+                    class: "{row_label_class}",
                     title: "発動時の被弾側 VelX/Y/Z (px/s)",
                     "Knockback"
                 }
-                span { class: "{label_class}", "x" }
-                input {
-                    r#type: "number",
-                    class: "{input_class}",
-                    step: "any",
-                    value: "{current.knockback.vel_x}",
-                    onchange: on_vel_x,
+                div { class: "{row_values_class}",
+                    div { class: "{pair_class}",
+                        span { class: "{label_class}", "x" }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            step: "any",
+                            value: "{current.knockback.vel_x}",
+                            onchange: on_vel_x,
+                        }
+                    }
+                    div { class: "{pair_class}",
+                        span { class: "{label_class}", "y" }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            step: "any",
+                            value: "{current.knockback.vel_y}",
+                            onchange: on_vel_y,
+                        }
+                    }
+                    div { class: "{pair_class}",
+                        span { class: "{label_class}", "z" }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            step: "any",
+                            value: "{current.knockback.vel_z}",
+                            onchange: on_vel_z,
+                        }
+                    }
                 }
-                span { class: "{label_class}", "y" }
-                input {
-                    r#type: "number",
-                    class: "{input_class}",
-                    step: "any",
-                    value: "{current.knockback.vel_y}",
-                    onchange: on_vel_y,
+            }
+
+            // --- HitStop section: ms / shake (x, y, count, decay) の 2 行 ---
+            // 全 default なら meta.hit_stop = None として親に流す (= YAML 上 meta から省略)。
+            // shake は片道 count 回ぶん三角波で揺らし、decay で振幅を線形に減衰させる。
+            // 1 片道目はキャラ向き前方 (X) / 画面上 (Y) → 旧 impact の役割を内包する。
+            div { class: "space-y-1",
+                h4 {
+                    class: "{row_label_class}",
+                    title: "Hit 演出 (空欄で被弾側 Hit アニメ frame 0 duration を継承)",
+                    "HitStop"
                 }
-                span { class: "{label_class}", "z" }
-                input {
-                    r#type: "number",
-                    class: "{input_class}",
-                    step: "any",
-                    value: "{current.knockback.vel_z}",
-                    onchange: on_vel_z,
+                div { class: "{row_values_class}",
+                    div { class: "{pair_class}",
+                        span { class: "{label_class}", title: "duration (ms、空欄で継承)", "ms" }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            min: "0",
+                            value: "{hs_duration_value}",
+                            onchange: on_hs_duration,
+                        }
+                    }
+                }
+                div { class: "{row_values_class}",
+                    div { class: "{pair_class}",
+                        span { class: "{label_class}", title: "shake の初期振幅 X (前方+/後方-)", "shake x" }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            value: "{current_hs.shake_x}",
+                            onchange: on_hs_shake_x,
+                        }
+                    }
+                    div { class: "{pair_class}",
+                        span { class: "{label_class}", title: "shake の初期振幅 Y (上+/下-)", "shake y" }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            value: "{current_hs.shake_y}",
+                            onchange: on_hs_shake_y,
+                        }
+                    }
+                    div { class: "{pair_class}",
+                        span {
+                            class: "{label_class}",
+                            title: "片道回数 (中心 ↔ ±max を 1 と数える)。1=ガクッと 1 回押す、2=ガクッ→戻る、4=1 周期。0 で shake なし",
+                            "count"
+                        }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            min: "0",
+                            value: "{current_hs.count}",
+                            onchange: on_hs_count,
+                        }
+                    }
+                    div { class: "{pair_class}",
+                        span {
+                            class: "{label_class}",
+                            title: "振幅の線形減衰率 (0=一定、1=末尾で 0)",
+                            "decay"
+                        }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            min: "0",
+                            max: "1",
+                            step: "0.05",
+                            value: "{current_hs.decay}",
+                            onchange: on_hs_decay,
+                        }
+                    }
                 }
             }
         }

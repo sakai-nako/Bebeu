@@ -8,9 +8,13 @@ use anyhow::Result;
 use bevy::asset::AssetPlugin;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
+use bevy::window::WindowResolution;
 
 use crate::entities::project::Project;
-use crate::features::character::{AnimationPlugin, MovementPlugin, StateMachinePlugin};
+use crate::features::character::{
+    AnimationPlugin, AttackPlugin, HitStopPlugin, HitboxDebugPlugin, MovementPlugin,
+    StateMachinePlugin,
+};
 use crate::scenes::{battle, result, title};
 use crate::shared::config::RuntimePaths;
 
@@ -19,6 +23,15 @@ use crate::shared::config::RuntimePaths;
 /// - `wgpu*` / `naga` は warn 以上 (Vulkan validation layer 未導入の警告などを抑制)
 /// - その他は info 既定
 const DEFAULT_LOG_FILTER: &str = "wgpu=error,wgpu_core=error,wgpu_hal=error,naga=warn,info";
+
+/// Project resolution に対する window 整数倍率。
+/// nearest filter の pixel art を **整数倍 upscale** で表示するための制約。
+/// 3 のとき 384×216 → 1152×648 (フル HD に余裕で乗る大きさ)。
+/// 非整数だと source pixel が screen 上で 3 px / 4 px と不揃いになる
+/// (rippling) ので、window サイズはこの倍率で固定する。
+const WINDOW_INTEGER_SCALE: u32 = 3;
+/// Project 未指定時に使う viewport 解像度の fallback (= main project の resolution)。
+const FALLBACK_VIEWPORT: (u32, u32) = (384, 216);
 
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
@@ -60,6 +73,24 @@ pub fn entrypoint() -> Result<()> {
     run(RunOptions { project_name })
 }
 
+/// engine の各 Plugin と `SceneState` を `app` に組み込む。GUI / Asset / Log といった
+/// Bevy 標準 plugin は呼び出し側が用意する (本番は `DefaultPlugins`、smoke test は
+/// `MinimalPlugins + AssetPlugin`)。
+///
+/// 戻り値は `&mut App` で chain 可能。
+pub fn register_engine_plugins(app: &mut App) -> &mut App {
+    app.init_state::<SceneState>()
+        .add_plugins(AnimationPlugin)
+        .add_plugins(MovementPlugin)
+        .add_plugins(StateMachinePlugin)
+        .add_plugins(AttackPlugin)
+        .add_plugins(HitStopPlugin)
+        .add_plugins(HitboxDebugPlugin)
+        .add_plugins(title::TitleScenePlugin)
+        .add_plugins(battle::BattleScenePlugin)
+        .add_plugins(result::ResultScenePlugin)
+}
+
 pub fn run(opts: RunOptions) -> Result<()> {
     tracing::info!(?opts, "engine: starting");
 
@@ -68,12 +99,51 @@ pub fn run(opts: RunOptions) -> Result<()> {
 
     let asset_root = runtime.data_dir().to_string_lossy().into_owned();
 
+    // Window 解像度を決めるため Project を先読み (WindowPlugin に project.resolution × N を渡す)。
+    // Project 未指定 or 読み込み失敗時は fallback resolution を使う。
+    let project = opts.project_name.as_deref().and_then(|name| {
+        let path = runtime.project_file(name);
+        match Project::load_from_file(&path, name) {
+            Ok(p) => {
+                tracing::info!(
+                    project = %p.name,
+                    players = ?p.players,
+                    opponents = ?p.opponents,
+                    levels = ?p.levels,
+                    "engine: project loaded",
+                );
+                Some(p)
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "engine: project load failed, continuing without it");
+                None
+            }
+        }
+    });
+    if opts.project_name.is_none() {
+        tracing::info!("engine: no project specified (use --project=<name> or BEATEMUP_PROJECT)");
+    }
+    let (vp_w, vp_h) = project.as_ref().map_or(FALLBACK_VIEWPORT, |p| {
+        (p.resolution.width, p.resolution.height)
+    });
+    let win_w = vp_w * WINDOW_INTEGER_SCALE;
+    let win_h = vp_h * WINDOW_INTEGER_SCALE;
+    tracing::info!(
+        viewport = ?(vp_w, vp_h),
+        window = ?(win_w, win_h),
+        scale = WINDOW_INTEGER_SCALE,
+        "engine: pixel-perfect window sized to integer scale of viewport",
+    );
+
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "beatemup".into(),
+                    // 物理 pixel で固定 + scale_factor_override(1.0) で OS DPI スケーリングを
+                    // 無視し、source pixel : screen pixel = 1 : WINDOW_INTEGER_SCALE を保証する。
+                    resolution: WindowResolution::new(win_w, win_h).with_scale_factor_override(1.0),
                     ..default()
                 }),
                 ..default()
@@ -88,34 +158,13 @@ pub fn run(opts: RunOptions) -> Result<()> {
                 ..default()
             }),
     )
-    .insert_resource(EngineConfig { project_name: opts.project_name.clone() })
-    .init_state::<SceneState>()
-    .add_plugins(AnimationPlugin)
-    .add_plugins(MovementPlugin)
-    .add_plugins(StateMachinePlugin)
-    .add_plugins(title::TitleScenePlugin)
-    .add_plugins(battle::BattleScenePlugin)
-    .add_plugins(result::ResultScenePlugin);
+    .insert_resource(EngineConfig {
+        project_name: opts.project_name.clone(),
+    });
+    register_engine_plugins(&mut app);
 
-    if let Some(name) = opts.project_name.as_deref() {
-        let path = runtime.project_file(name);
-        match Project::load_from_file(&path, name) {
-            Ok(project) => {
-                tracing::info!(
-                    project = %project.name,
-                    players = ?project.players,
-                    opponents = ?project.opponents,
-                    levels = ?project.levels,
-                    "engine: project loaded",
-                );
-                app.insert_resource(project);
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "engine: project load failed, continuing without it");
-            }
-        }
-    } else {
-        tracing::info!("engine: no project specified (use --project=<name> or BEATEMUP_PROJECT)");
+    if let Some(project) = project {
+        app.insert_resource(project);
     }
 
     app.insert_resource(runtime).run();
