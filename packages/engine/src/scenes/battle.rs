@@ -10,15 +10,15 @@ use bevy::sprite::Anchor;
 
 use crate::app::{PixelPerfectTarget, SceneState};
 use crate::entities::character::{
-    Animation, AttackBox, AttackBoxOverride, Character, Frame, HitBox, Role, SpriteEntry,
-    SpriteGroup,
+    Animation, AttackBox, AttackBoxMeta, AttackBoxOverride, Character, Frame, HitBox, Role,
+    SpriteEntry, SpriteGroup,
 };
 use crate::entities::level::{Level, OpponentTrigger};
 use crate::entities::project::Project;
 use crate::features::character::{
     AnimationData, AnimationFrames, AttackHitConsumed, BodyBox, CharacterDepth, CharacterState,
-    Enemy, EnemyAnimationSet, Facing, FrameRender, HitPoints, MainCamera, Player,
-    PlayerAnimationLibrary, VSYNC_TICK, WorldPosition,
+    Combatant, Enemy, EnemyAnimationSet, Facing, FrameRender, HitPoints, KinematicVel, MainCamera,
+    PhysicsParams, Player, PlayerAnimationLibrary, VSYNC_TICK, WorldPosition,
 };
 use crate::shared::config::RuntimePaths;
 use crate::shared::flip::flip_x_of;
@@ -140,12 +140,22 @@ fn setup(
         "battle: character loaded",
     );
 
-    // idle / walk / attack の Animation を build_animation_frames して library に投入。
-    // 起動時にここで PNG header を全部読むので、以降の state 切替は O(1)。
+    // `Role::all_loadable()` の全 Role について Animation を build_animation_frames して
+    // library に投入 (Custom は除外)。起動時に PNG header を全部読むので、以降の state
+    // 切替は O(1)。未登録 Role は state_machine 側の `resolve_animation_role` (ADR-0025
+    // 4 段 fallback) が劣化させるので破綻しない。
     let mut library = PlayerAnimationLibrary::default();
-    for role in [Role::Idle, Role::Walk, Role::Attack] {
+    for &role in Role::all_loadable() {
         let Some(anim) = character.animations.iter().find(|a| a.role == role) else {
-            tracing::warn!(?role, "battle: character has no animation for role");
+            // 基本系 (Idle/Walk/Attack) の不在は warn、Knockback 系は debug (fallback が効く)。
+            if matches!(role, Role::Idle | Role::Walk | Role::Attack) {
+                tracing::warn!(?role, "battle: character has no animation for role");
+            } else {
+                tracing::debug!(
+                    ?role,
+                    "battle: character has no animation for role (will fall back)",
+                );
+            }
             continue;
         };
         let Some(frames) = build_animation_frames(
@@ -212,6 +222,11 @@ fn setup(
         BodyBox::default_for_world(player_pos),
         AttackHitConsumed::default(),
         CharacterDepth(character.depth),
+        // 吹っ飛びフロー用 (ADR-0024 Phase A)。Phase A の player は被弾しないが、
+        // 将来の Combatant 統一に向けて attach しておく。
+        Combatant::new(&character.physics),
+        KinematicVel::default(),
+        PhysicsParams(character.physics.clone()),
     ));
 
     commands.insert_resource(library);
@@ -275,11 +290,10 @@ fn build_animation_frames(
             duration: VSYNC_TICK * frame.ticks.max(1),
             flip_x: flip_x_of(frame.flip) ^ flip_x_of(layer.flip),
             alpha: layer.transparency.clamp(0.0, 1.0),
-            attack_damage: extract_attack_damage(frame, sprite),
+            attack_meta: extract_attack_meta(frame, sprite),
             attack_box_geom: extract_attack_box_geom(frame, sprite),
             body_box_geoms: extract_body_box_geoms(frame, sprite),
             sprite_pivot: [pivot_x, pivot_y],
-            attack_hit_stop: extract_attack_hit_stop(frame, sprite),
         });
     }
 
@@ -325,12 +339,13 @@ fn resolve_attack_box(frame: &Frame, sprite: &SpriteEntry) -> Option<AttackBox> 
     }
 }
 
-/// `resolve_attack_box` の `meta.damage`。`None` で攻撃判定なし。
+/// `resolve_attack_box` の `meta` を返す。`None` のときは攻撃判定なし (= meta が
+/// sprite / override どちらにも書かれていない、または override で Disable された frame)。
+/// FrameRender はこの値を持って attack 系 system に流す (damage / knockback / hit_stop
+/// は呼び出し側がここから派生して読む)。
 #[must_use]
-fn extract_attack_damage(frame: &Frame, sprite: &SpriteEntry) -> Option<u32> {
-    resolve_attack_box(frame, sprite)
-        .and_then(|ab| ab.meta)
-        .map(|m| m.damage)
+fn extract_attack_meta(frame: &Frame, sprite: &SpriteEntry) -> Option<AttackBoxMeta> {
+    resolve_attack_box(frame, sprite).and_then(|ab| ab.meta)
 }
 
 /// `resolve_attack_box` の `hitbox`。`None` で attack 判定なし。
@@ -339,17 +354,6 @@ fn extract_attack_damage(frame: &Frame, sprite: &SpriteEntry) -> Option<u32> {
 #[must_use]
 fn extract_attack_box_geom(frame: &Frame, sprite: &SpriteEntry) -> Option<HitBox> {
     resolve_attack_box(frame, sprite).map(|ab| ab.hitbox)
-}
-
-/// `resolve_attack_box` の `meta.hit_stop`。`None` で hit_stop なし (= 即 Hit state)。
-#[must_use]
-fn extract_attack_hit_stop(
-    frame: &Frame,
-    sprite: &SpriteEntry,
-) -> Option<crate::entities::character::HitStop> {
-    resolve_attack_box(frame, sprite)
-        .and_then(|ab| ab.meta)
-        .and_then(|m| m.hit_stop)
 }
 
 /// Frame の body_box_overrides を editor 互換の 3-state で解釈し、有効な BodyBox 列を返す。
@@ -421,7 +425,11 @@ fn spawn_opponents_on_trigger(
     };
     let mut anim_set = EnemyAnimationSet::default();
     anim_set.insert(Role::Idle, idle_data.clone());
-    for role in [Role::Hit] {
+    // Idle 以外の全 loadable Role を試行 (Custom 除外、ADR-0025 chain で fallback)。
+    for &role in Role::all_loadable() {
+        if role == Role::Idle {
+            continue; // 既に投入済み
+        }
         if let Some(data) = build_role_animation_data(
             &runtime,
             &asset_server,
@@ -466,6 +474,10 @@ fn spawn_opponents_on_trigger(
         HitPoints::new(character.hp),
         CharacterDepth(character.depth),
         anim_set,
+        // 吹っ飛びフロー用 (ADR-0024 Phase A)。被弾側として gauge / 速度 / physics を持つ。
+        Combatant::new(&character.physics),
+        KinematicVel::default(),
+        PhysicsParams(character.physics.clone()),
     ));
 }
 
@@ -533,8 +545,6 @@ mod tests {
         assert_eq!(next_triggered_index(&triggers, 200.0), Some(0));
     }
 
-    use crate::entities::character::AttackBoxMeta;
-
     fn ab(damage: u32) -> AttackBox {
         AttackBox {
             hitbox: HitBox {
@@ -571,41 +581,45 @@ mod tests {
         }
     }
 
-    #[test]
-    fn extract_attack_damage_inherits_from_sprite_when_no_override() {
-        // frame.overrides=None → sprite.attack_boxes が使われる
-        let frame = Frame::default();
-        let sprite = sprite_with(Some(vec![ab(30)]));
-        assert_eq!(extract_attack_damage(&frame, &sprite), Some(30));
+    fn meta_damage(frame: &Frame, sprite: &SpriteEntry) -> Option<u32> {
+        extract_attack_meta(frame, sprite).map(|m| m.damage)
     }
 
     #[test]
-    fn extract_attack_damage_disabled_when_override_empty_vec() {
+    fn extract_attack_meta_inherits_from_sprite_when_no_override() {
+        // frame.overrides=None → sprite.attack_boxes が使われる
+        let frame = Frame::default();
+        let sprite = sprite_with(Some(vec![ab(30)]));
+        assert_eq!(meta_damage(&frame, &sprite), Some(30));
+    }
+
+    #[test]
+    fn extract_attack_meta_disabled_when_override_empty_vec() {
         // frame.overrides=Some(empty) → Disable (sprite を見ない)
         let frame = Frame {
             attack_box_overrides: Some(vec![]),
             ..Frame::default()
         };
         let sprite = sprite_with(Some(vec![ab(30)]));
-        assert!(extract_attack_damage(&frame, &sprite).is_none());
+        assert!(extract_attack_meta(&frame, &sprite).is_none());
     }
 
     #[test]
-    fn extract_attack_damage_overrides_sprite_when_non_empty() {
+    fn extract_attack_meta_overrides_sprite_when_non_empty() {
         // frame.overrides=Some(non-empty) → override の値 (sprite は見ない)
         let frame = Frame {
             attack_box_overrides: Some(vec![ab_override(40)]),
             ..Frame::default()
         };
         let sprite = sprite_with(Some(vec![ab(30)]));
-        assert_eq!(extract_attack_damage(&frame, &sprite), Some(40));
+        assert_eq!(meta_damage(&frame, &sprite), Some(40));
     }
 
     #[test]
-    fn extract_attack_damage_none_when_neither_sprite_nor_override() {
+    fn extract_attack_meta_none_when_neither_sprite_nor_override() {
         let frame = Frame::default();
         let sprite = sprite_with(None);
-        assert!(extract_attack_damage(&frame, &sprite).is_none());
+        assert!(extract_attack_meta(&frame, &sprite).is_none());
     }
 
     #[test]
@@ -631,7 +645,7 @@ mod tests {
         };
         let sprite = sprite_with(Some(vec![ab(30)]));
         // meta は override 値が勝つ
-        assert_eq!(extract_attack_damage(&frame, &sprite), Some(99));
+        assert_eq!(meta_damage(&frame, &sprite), Some(99));
         // hitbox は sprite から継承される (bottom_right = [10, 10])
         let geom = extract_attack_box_geom(&frame, &sprite).expect("hitbox should be inherited");
         assert_eq!(geom.bottom_right, [10, 10]);
@@ -657,7 +671,7 @@ mod tests {
         let geom = extract_attack_box_geom(&frame, &sprite).expect("hitbox should be overridden");
         assert_eq!(geom.bottom_right, alt.bottom_right);
         // meta は sprite から継承される (damage = 30)
-        assert_eq!(extract_attack_damage(&frame, &sprite), Some(30));
+        assert_eq!(meta_damage(&frame, &sprite), Some(30));
     }
 
     #[test]
@@ -668,7 +682,7 @@ mod tests {
             ..Frame::default()
         };
         let sprite = sprite_with(Some(vec![ab(30)]));
-        assert_eq!(extract_attack_damage(&frame, &sprite), Some(30));
+        assert_eq!(meta_damage(&frame, &sprite), Some(30));
         let geom = extract_attack_box_geom(&frame, &sprite).expect("inherited");
         assert_eq!(geom.bottom_right, [10, 10]);
     }
@@ -690,7 +704,7 @@ mod tests {
             ..Frame::default()
         };
         let sprite = sprite_with(None);
-        assert!(extract_attack_damage(&frame, &sprite).is_none());
+        assert!(meta_damage(&frame, &sprite).is_none());
         assert!(extract_attack_box_geom(&frame, &sprite).is_some());
     }
 
@@ -709,7 +723,7 @@ mod tests {
         };
         let sprite = sprite_with(None);
         assert!(extract_attack_box_geom(&frame, &sprite).is_none());
-        assert!(extract_attack_damage(&frame, &sprite).is_none());
+        assert!(meta_damage(&frame, &sprite).is_none());
     }
 
     fn body_hb() -> HitBox {

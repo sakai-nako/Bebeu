@@ -21,6 +21,7 @@ use crate::entities::character::Role;
 
 use super::animation::{AnimationFrames, FrameRender};
 use super::hit_stop::HitStopState;
+use super::knockback::{Combatant, FinalAction};
 use super::movement::{Enemy, Facing, Player, flip_anchor, total_flip_x};
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,9 +31,32 @@ pub enum CharacterState {
     Walk,
     Attack,
     Hit,
+    /// 吹っ飛び上昇 (ADR-0024)。`KinematicVel` の積分 + gravity を [`super::knockback`]
+    /// が回し、vel_y<=0 (apex) で [`Self::KnockbackDown`] に遷移する。
+    KnockbackUp,
+    /// 吹っ飛び下降。着地 (y<=0) で `Combatant.remaining_bounces` に応じて
+    /// [`Self::BounceUp`] (残あり) か [`Self::Slide`] (残ゼロ) に遷移。
+    KnockbackDown,
+    /// バウンド後の上昇。`KnockbackUp` と同じ物理だが、着地時の挙動と意味づけが違うので
+    /// Action 別。apex で [`Self::BounceDown`] へ。
+    BounceUp,
+    /// バウンド後の下降。`KnockbackDown` と同じ物理。着地で残数を 1 消費して再度 Bounce
+    /// するか、ゼロなら [`Self::Slide`] に落ちる。
+    BounceDown,
+    /// 地面を滑る状態。`Physics.ground_friction` で X/Z を減速し、ほぼ停止で
+    /// [`Self::LieDown`] に進む。Phase B の最終フェーズ。
+    Slide,
+    /// 着地後の倒れポーズ。`Combatant.stage_timer_ticks` で固定時間カウントし、終わったら
+    /// [`Self::Rise`] へ。Animation 終端でも進む (二重終了条件、ADR-0025)。
+    /// `Combatant.final_action == Dead` なら Rise に遷移せず永続停止 (= KO 演出)。
+    LieDown,
+    /// 起き上がりポーズ。終わったら [`Self::Idle`] に戻る。
+    Rise,
 }
 
 impl CharacterState {
+    /// Animation 解決用 Role。Phase A/B は 1:1 mapping のみ。ADR-0025 の prefix 付き
+    /// fallback (`back_*` / `dead_*`) は Phase C で導入。
     #[must_use]
     pub fn to_role(self) -> Role {
         match self {
@@ -40,14 +64,34 @@ impl CharacterState {
             Self::Walk => Role::Walk,
             Self::Attack => Role::Attack,
             Self::Hit => Role::Hit,
+            Self::KnockbackUp => Role::KnockbackUp,
+            Self::KnockbackDown => Role::KnockbackDown,
+            Self::BounceUp => Role::BounceUp,
+            Self::BounceDown => Role::BounceDown,
+            Self::Slide => Role::Slide,
+            Self::LieDown => Role::LieDown,
+            Self::Rise => Role::Rise,
         }
     }
 
-    /// Attack / Hit のような単発 (is_loop=false 想定) アクション中は、入力 / AI による
-    /// Idle/Walk 等への上書きを抑制する。終端は [`end_oneshot_actions`] が Idle に戻す。
+    /// Attack / Hit / 吹っ飛びフロー中は、入力 / AI による Idle/Walk 等への上書きを抑制する。
+    /// 単発系 (Attack / Hit / Rise) は再生終端で `end_oneshot_actions` が Idle に戻し、
+    /// Knockback 物理系 (KnockbackUp/Down / Bounce / Slide / LieDown) は
+    /// `super::knockback` が次段へ遷移させる。
     #[must_use]
     pub fn is_locked(self) -> bool {
-        matches!(self, Self::Attack | Self::Hit)
+        matches!(
+            self,
+            Self::Attack
+                | Self::Hit
+                | Self::KnockbackUp
+                | Self::KnockbackDown
+                | Self::BounceUp
+                | Self::BounceDown
+                | Self::Slide
+                | Self::LieDown
+                | Self::Rise
+        )
     }
 }
 
@@ -92,14 +136,132 @@ impl Plugin for StateMachinePlugin {
 /// トリガして対応する sync_* system が AnimationFrames を差し替える。
 /// `HitStopState` 中は Animation 進行が freeze されているので state 遷移も block する
 /// (= hit_stop 解除後に通常の Idle 復帰へ流れる)。
+///
+/// 吹っ飛びフロー (`KnockbackUp`/`Down`/`LieDown`/`Rise`) は state 遷移が `super::knockback`
+/// (物理 / 固定 timer) 側で起きるので、この generic な末尾 → Idle は適用しない。
+/// `Attack` / `Hit` のみが対象。
 fn end_oneshot_actions(
     mut query: Query<(&AnimationFrames, &mut CharacterState), Without<HitStopState>>,
 ) {
     for (anim, mut state) in &mut query {
-        if state.is_locked() && anim.is_finished() {
+        if matches!(*state, CharacterState::Attack | CharacterState::Hit) && anim.is_finished() {
             *state = CharacterState::Idle;
         }
     }
+}
+
+/// ADR-0025: 被弾方向 (`hit_from_behind`) と致命傷 (`final_action`) で Animation を多段
+/// フォールバックする。優先度は:
+///
+/// ```text
+/// (Dead, Behind) → DeadBackX → DeadX → BackX → X
+/// (Dead, Front)  →            DeadX →         X
+/// (Alive, Behind) →                  BackX → X
+/// (Alive, Front)  →                          X
+/// ```
+///
+/// ここで `X` は `state.to_role()` の基本 Role。Knockback 系以外 (Idle/Walk/Attack/Hit/...)
+/// は prefix variant が存在しないので、結果として 1:1 mapping になる。
+///
+/// 最終 safety net として `is_knockback_role(X) → Hit` のフォールバックも残す
+/// (= 旧 character が Hit しか持たないケースを保護)。
+fn resolve_animation_role<'a, F>(
+    state: CharacterState,
+    hit_from_behind: bool,
+    final_action: FinalAction,
+    get: F,
+) -> Option<&'a AnimationData>
+where
+    F: Fn(Role) -> Option<&'a AnimationData>,
+{
+    let base = state.to_role();
+    let dead = final_action == FinalAction::Dead;
+    let back = hit_from_behind;
+
+    if dead && back {
+        if let Some(data) = dead_back_variant(base).and_then(&get) {
+            return Some(data);
+        }
+    }
+    if dead {
+        if let Some(data) = dead_variant(base).and_then(&get) {
+            return Some(data);
+        }
+    }
+    if back {
+        if let Some(data) = back_variant(base).and_then(&get) {
+            return Some(data);
+        }
+    }
+    if let Some(data) = get(base) {
+        return Some(data);
+    }
+    // 最終 safety net: Knockback 系 (= 物理ステージ) の Role が character に 1 つも
+    // 登録されていない場合、`Hit` まで劣化させる。Phase A/B 時代の暫定処理を継承。
+    if is_knockback_role(base) {
+        return get(Role::Hit);
+    }
+    None
+}
+
+/// `role` が ADR-0024/0025 の物理ステージ (= Knockback フロー 7 個 + prefix variants) なら
+/// `true`。Animation の最終 safety net 判定で使う。
+#[must_use]
+fn is_knockback_role(role: Role) -> bool {
+    matches!(
+        role,
+        Role::KnockbackUp
+            | Role::KnockbackDown
+            | Role::BounceUp
+            | Role::BounceDown
+            | Role::Slide
+            | Role::LieDown
+            | Role::Rise
+    )
+}
+
+/// `back_*` 系 Role への変換。Rise も BackRise を持つ (Dead 系のみ Rise なし)。
+#[must_use]
+fn back_variant(role: Role) -> Option<Role> {
+    Some(match role {
+        Role::KnockbackUp => Role::BackKnockbackUp,
+        Role::KnockbackDown => Role::BackKnockbackDown,
+        Role::BounceUp => Role::BackBounceUp,
+        Role::BounceDown => Role::BackBounceDown,
+        Role::Slide => Role::BackSlide,
+        Role::LieDown => Role::BackLieDown,
+        Role::Rise => Role::BackRise,
+        _ => return None,
+    })
+}
+
+/// `dead_*` 系 Role への変換。Rise / BackRise は Dead 系の対応 variant を持たない (死んだら
+/// 起き上がらないため)。state 側のフローでも Dead 中は Rise に進まないので呼ばれないはず。
+#[must_use]
+fn dead_variant(role: Role) -> Option<Role> {
+    Some(match role {
+        Role::KnockbackUp => Role::DeadKnockbackUp,
+        Role::KnockbackDown => Role::DeadKnockbackDown,
+        Role::BounceUp => Role::DeadBounceUp,
+        Role::BounceDown => Role::DeadBounceDown,
+        Role::Slide => Role::DeadSlide,
+        Role::LieDown => Role::DeadLieDown,
+        _ => return None,
+    })
+}
+
+/// `dead_back_*` 系 Role への変換。Rise 系は持たない (Dead 系と同じ理由)。
+#[must_use]
+fn dead_back_variant(role: Role) -> Option<Role> {
+    Some(match role {
+        Role::KnockbackUp => Role::DeadBackKnockbackUp,
+        Role::KnockbackDown => Role::DeadBackKnockbackDown,
+        Role::BounceUp => Role::DeadBackBounceUp,
+        Role::BounceDown => Role::DeadBackBounceDown,
+        Role::Slide => Role::DeadBackSlide,
+        Role::LieDown => Role::DeadBackLieDown,
+        _ => return None,
+    })
 }
 
 /// Player の CharacterState が変化したら、`PlayerAnimationLibrary` (Resource) から該当
@@ -115,6 +277,7 @@ fn sync_animation(
         (
             &CharacterState,
             &Facing,
+            &Combatant,
             &mut AnimationFrames,
             &mut Sprite,
             &mut Anchor,
@@ -122,13 +285,19 @@ fn sync_animation(
         (With<Player>, Changed<CharacterState>),
     >,
 ) {
-    for (state, facing, mut anim, mut sprite, mut anchor) in &mut query {
-        let role = state.to_role();
-        let Some(data) = library.get(role) else {
+    for (state, facing, combatant, mut anim, mut sprite, mut anchor) in &mut query {
+        let Some(data) = resolve_animation_role(
+            *state,
+            combatant.hit_from_behind,
+            combatant.final_action,
+            |r| library.get(r),
+        ) else {
             tracing::warn!(
                 ?state,
-                ?role,
-                "state_machine: no AnimationData for player role"
+                base_role = ?state.to_role(),
+                hit_from_behind = combatant.hit_from_behind,
+                final_action = ?combatant.final_action,
+                "state_machine: no AnimationData for player",
             );
             continue;
         };
@@ -144,6 +313,7 @@ fn sync_enemy_animation(
         (
             &CharacterState,
             &Facing,
+            &Combatant,
             &EnemyAnimationSet,
             &mut AnimationFrames,
             &mut Sprite,
@@ -152,13 +322,19 @@ fn sync_enemy_animation(
         (With<Enemy>, Changed<CharacterState>),
     >,
 ) {
-    for (state, facing, set, mut anim, mut sprite, mut anchor) in &mut query {
-        let role = state.to_role();
-        let Some(data) = set.get(role) else {
+    for (state, facing, combatant, set, mut anim, mut sprite, mut anchor) in &mut query {
+        let Some(data) = resolve_animation_role(
+            *state,
+            combatant.hit_from_behind,
+            combatant.final_action,
+            |r| set.get(r),
+        ) else {
             tracing::warn!(
                 ?state,
-                ?role,
-                "state_machine: no AnimationData for enemy role"
+                base_role = ?state.to_role(),
+                hit_from_behind = combatant.hit_from_behind,
+                final_action = ?combatant.final_action,
+                "state_machine: no AnimationData for enemy",
             );
             continue;
         };
@@ -217,15 +393,172 @@ mod tests {
         assert_eq!(CharacterState::Walk.to_role(), Role::Walk);
         assert_eq!(CharacterState::Attack.to_role(), Role::Attack);
         assert_eq!(CharacterState::Hit.to_role(), Role::Hit);
+        assert_eq!(CharacterState::KnockbackUp.to_role(), Role::KnockbackUp);
+        assert_eq!(CharacterState::KnockbackDown.to_role(), Role::KnockbackDown);
+        assert_eq!(CharacterState::BounceUp.to_role(), Role::BounceUp);
+        assert_eq!(CharacterState::BounceDown.to_role(), Role::BounceDown);
+        assert_eq!(CharacterState::Slide.to_role(), Role::Slide);
+        assert_eq!(CharacterState::LieDown.to_role(), Role::LieDown);
+        assert_eq!(CharacterState::Rise.to_role(), Role::Rise);
     }
 
     #[test]
     fn character_state_is_locked_for_oneshot_actions() {
-        // Attack / Hit は 1-shot で、入力 / AI からは上書きされない。
+        // 入力 / AI で上書きされない state: Attack / Hit / 吹っ飛びフロー全部。
         assert!(!CharacterState::Idle.is_locked());
         assert!(!CharacterState::Walk.is_locked());
         assert!(CharacterState::Attack.is_locked());
         assert!(CharacterState::Hit.is_locked());
+        assert!(CharacterState::KnockbackUp.is_locked());
+        assert!(CharacterState::KnockbackDown.is_locked());
+        assert!(CharacterState::BounceUp.is_locked());
+        assert!(CharacterState::BounceDown.is_locked());
+        assert!(CharacterState::Slide.is_locked());
+        assert!(CharacterState::LieDown.is_locked());
+        assert!(CharacterState::Rise.is_locked());
+    }
+
+    /// id 別に AnimationData を作る。`loop_start_index` を識別子として使い、
+    /// `resolve_animation_role` の戻り値がどの Role 経路で解決されたかを比較する。
+    fn anim_with_id(id: usize) -> AnimationData {
+        AnimationData {
+            frames: vec![],
+            is_loop: false,
+            loop_start_index: id,
+        }
+    }
+
+    fn dummy_anim() -> AnimationData {
+        anim_with_id(0)
+    }
+
+    #[test]
+    fn resolve_animation_role_returns_specific_when_registered() {
+        let data = dummy_anim();
+        let get = |r: Role| -> Option<&AnimationData> { (r == Role::KnockbackUp).then_some(&data) };
+        assert!(
+            resolve_animation_role(
+                CharacterState::KnockbackUp,
+                false,
+                FinalAction::LieDown,
+                get,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn resolve_animation_role_prefers_dead_back_over_dead_over_back_over_base() {
+        // 全 4 variant が登録されているケース: (Dead, Behind) は DeadBack を返す。
+        let dead_back = anim_with_id(4);
+        let dead = anim_with_id(3);
+        let back = anim_with_id(2);
+        let base = anim_with_id(1);
+        let get = |r: Role| -> Option<&AnimationData> {
+            Some(match r {
+                Role::DeadBackKnockbackUp => &dead_back,
+                Role::DeadKnockbackUp => &dead,
+                Role::BackKnockbackUp => &back,
+                Role::KnockbackUp => &base,
+                _ => return None,
+            })
+        };
+        // (Dead, Behind) → DeadBack 優先
+        let data =
+            resolve_animation_role(CharacterState::KnockbackUp, true, FinalAction::Dead, get)
+                .expect("should resolve");
+        assert_eq!(data.loop_start_index, 4);
+    }
+
+    #[test]
+    fn resolve_animation_role_falls_back_through_chain() {
+        // dead_back が未登録なら Dead に劣化。
+        let dead = anim_with_id(3);
+        let back = anim_with_id(2);
+        let base = anim_with_id(1);
+        let get = |r: Role| -> Option<&AnimationData> {
+            Some(match r {
+                Role::DeadKnockbackUp => &dead,
+                Role::BackKnockbackUp => &back,
+                Role::KnockbackUp => &base,
+                _ => return None,
+            })
+        };
+        let data =
+            resolve_animation_role(CharacterState::KnockbackUp, true, FinalAction::Dead, get)
+                .expect("should resolve");
+        // DeadBackKnockbackUp が無いので Dead に劣化
+        assert_eq!(data.loop_start_index, 3);
+    }
+
+    #[test]
+    fn resolve_animation_role_alive_front_uses_base_only() {
+        // (Alive, Front) は Back / Dead variant をスキップして直接 base に行く。
+        let back = anim_with_id(2);
+        let base = anim_with_id(1);
+        let get = |r: Role| -> Option<&AnimationData> {
+            Some(match r {
+                Role::BackKnockbackUp => &back,
+                Role::KnockbackUp => &base,
+                _ => return None,
+            })
+        };
+        let data = resolve_animation_role(
+            CharacterState::KnockbackUp,
+            false,
+            FinalAction::LieDown,
+            get,
+        )
+        .expect("should resolve");
+        assert_eq!(data.loop_start_index, 1);
+    }
+
+    #[test]
+    fn resolve_animation_role_safety_net_falls_back_to_hit() {
+        // base も prefix variant も全く未登録だが Hit はある → 物理ステージ Role なら Hit。
+        let hit = dummy_anim();
+        let get = |r: Role| -> Option<&AnimationData> { (r == Role::Hit).then_some(&hit) };
+        for state in [
+            CharacterState::KnockbackUp,
+            CharacterState::KnockbackDown,
+            CharacterState::BounceUp,
+            CharacterState::BounceDown,
+            CharacterState::Slide,
+            CharacterState::LieDown,
+            CharacterState::Rise,
+        ] {
+            assert!(
+                resolve_animation_role(state, false, FinalAction::LieDown, get).is_some(),
+                "{state:?} should fall back to Hit"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_animation_role_idle_walk_do_not_fall_back_to_hit() {
+        // Idle / Walk / Attack は物理ステージではないので Hit fallback の対象外。
+        let hit = dummy_anim();
+        let get = |r: Role| -> Option<&AnimationData> { (r == Role::Hit).then_some(&hit) };
+        for state in [
+            CharacterState::Idle,
+            CharacterState::Walk,
+            CharacterState::Attack,
+        ] {
+            assert!(
+                resolve_animation_role(state, false, FinalAction::LieDown, get).is_none(),
+                "{state:?} should NOT fall back to Hit"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_animation_role_rise_has_back_variant_but_no_dead() {
+        // Rise は BackRise を持つが、Dead 系 Rise variant は無い (dead だと Rise しないため)。
+        // dead_variant(Rise) / dead_back_variant(Rise) は None。よって Dead フラグ + Rise の
+        // ケースでは Back / Base を試行する。
+        assert!(dead_variant(Role::Rise).is_none());
+        assert!(dead_back_variant(Role::Rise).is_none());
+        assert_eq!(back_variant(Role::Rise), Some(Role::BackRise));
     }
 
     #[test]

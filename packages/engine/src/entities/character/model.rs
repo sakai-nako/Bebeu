@@ -27,8 +27,15 @@ pub const DEFAULT_RISE_DURATION_MS: u32 = 300;
 
 // === Role ===
 
-/// Animation の役割。engine 側 State (Idle/Walk/Attack/Hit/Dead/Jump/Block) と
+/// Animation の役割。engine 側 State (Idle/Walk/Attack/Hit/Jump/Block + 吹っ飛び flow) と
 /// semantic に紐付ける。役割なしの YAML や Custom Animation は [`Role::Custom`] として扱う。
+///
+/// Knockback 系 (7 個 × 4 軸 = 通常 / Back / Dead / DeadBack の prefix; Rise は Dead 系 2 つを
+/// 持たない) は ADR-0024/0025 の吹っ飛びフローに対応する。Animation 解決は
+/// [`super::super::super::features::character::state_machine`] の `resolve_animation_role` が
+/// `(state, hit_from_behind, final_action)` から 4 段フォールバック chain を試行する。
+///
+/// 旧 `dead` role は [`Role::DeadLieDown`] に集約 (serde alias で旧 YAML 互換)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -36,11 +43,81 @@ pub enum Role {
     Walk,
     Attack,
     Hit,
-    Dead,
     Jump,
     Block,
+    KnockbackUp,
+    KnockbackDown,
+    BounceUp,
+    BounceDown,
+    Slide,
+    LieDown,
+    Rise,
+    BackKnockbackUp,
+    BackKnockbackDown,
+    BackBounceUp,
+    BackBounceDown,
+    BackSlide,
+    BackLieDown,
+    BackRise,
+    DeadKnockbackUp,
+    DeadKnockbackDown,
+    DeadBounceUp,
+    DeadBounceDown,
+    DeadSlide,
+    /// 死亡時の最終静止。Rise に進まず Animation 末尾で永続停止する。
+    /// 旧形式 (`role: dead`) は alias でこの variant に読み替えられる。
+    #[serde(alias = "dead")]
+    DeadLieDown,
+    DeadBackKnockbackUp,
+    DeadBackKnockbackDown,
+    DeadBackBounceUp,
+    DeadBackBounceDown,
+    DeadBackSlide,
+    DeadBackLieDown,
     #[default]
     Custom,
+}
+
+impl Role {
+    /// battle scene が起動時にロードを試みる Role 一覧 (Custom 以外)。順序は安定性のため
+    /// 「基本 → Knockback (通常) → Back → Dead → DeadBack」で固定する。
+    #[must_use]
+    pub const fn all_loadable() -> &'static [Role] {
+        &[
+            Role::Idle,
+            Role::Walk,
+            Role::Attack,
+            Role::Hit,
+            Role::Jump,
+            Role::Block,
+            Role::KnockbackUp,
+            Role::KnockbackDown,
+            Role::BounceUp,
+            Role::BounceDown,
+            Role::Slide,
+            Role::LieDown,
+            Role::Rise,
+            Role::BackKnockbackUp,
+            Role::BackKnockbackDown,
+            Role::BackBounceUp,
+            Role::BackBounceDown,
+            Role::BackSlide,
+            Role::BackLieDown,
+            Role::BackRise,
+            Role::DeadKnockbackUp,
+            Role::DeadKnockbackDown,
+            Role::DeadBounceUp,
+            Role::DeadBounceDown,
+            Role::DeadSlide,
+            Role::DeadLieDown,
+            Role::DeadBackKnockbackUp,
+            Role::DeadBackKnockbackDown,
+            Role::DeadBackBounceUp,
+            Role::DeadBackBounceDown,
+            Role::DeadBackSlide,
+            Role::DeadBackLieDown,
+        ]
+    }
 }
 
 // === Physics ===

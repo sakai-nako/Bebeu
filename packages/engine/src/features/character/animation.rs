@@ -15,7 +15,7 @@ use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
-use crate::entities::character::{HitBox, HitStop};
+use crate::entities::character::{AttackBoxMeta, HitBox, HitStop};
 
 use super::hit_stop::HitStopState;
 
@@ -41,13 +41,15 @@ pub struct FrameRender {
     pub flip_x: bool,
     /// 0.0..=1.0 の透明度。`Sprite.color` の alpha に焼く。
     pub alpha: f32,
-    /// この frame で AttackBox が active なときの 1 hit あたり damage 量 (`Some(n)`)。
-    /// `None` なら attack 判定なし。Frame.attack_box_overrides の先頭 meta.damage を
-    /// build 時に焼き込む (ADR-0024 への踏み出し)。
-    pub attack_damage: Option<u32>,
+    /// この frame で active な AttackBox の効果データ (damage / knockback_damage /
+    /// knockback ベクトル / hit_stop)。`None` で attack 判定なし。
+    /// `Frame.attack_box_overrides` と sprite 側 `attack_boxes` を merge した結果
+    /// (= `resolve_attack_box`) を build 時に焼き込む。`current_attack_damage` /
+    /// `current_attack_hit_stop` 等の旧 API は本 field から派生する。
+    pub attack_meta: Option<AttackBoxMeta>,
     /// この frame で active な AttackBox の幾何 (画像 pixel 内 HitBox)。
     /// `Some` のとき `world_box_from_hitbox` でこの frame の `sprite_pivot` を基準に world XYZ
-    /// box を求める。`None` なら attack 判定なし (attack_damage も None 想定)。
+    /// box を求める。`None` なら attack 判定なし (`attack_meta` も None 想定)。
     pub attack_box_geom: Option<HitBox>,
     /// この frame で active な BodyBox の幾何 (画像 pixel 内 HitBox)。Vec で複数 box を
     /// 許容するが、engine が見るのは現状 **先頭要素だけ**。空なら BodyBox なし。
@@ -58,10 +60,6 @@ pub struct FrameRender {
     /// `frame.pivot_point_offset` と `layer.pivot_point_offset` を加算したもの。
     /// AttackBox / BodyBox の世界変換で「画像座標 → world 座標」の原点として使う。
     pub sprite_pivot: [i32; 2],
-    /// この frame で hit が決まったときに発火する hit_stop 演出パラメータ。`None` で
-    /// hit_stop なし (= 即座に通常の Hit state へ)。Frame.attack_box_overrides の
-    /// 先頭 meta.hit_stop (= resolve_attack_box の merge 結果) を build 時に焼き込む。
-    pub attack_hit_stop: Option<HitStop>,
 }
 
 #[derive(Component)]
@@ -130,11 +128,20 @@ impl AnimationFrames {
         self.current
     }
 
-    /// 現在 frame の attack_damage (`None` なら攻撃判定なし)。
-    /// attack 系 system はこの値で「今この frame で AttackBox を生やすか」を判定する。
+    /// 現在 frame の AttackBoxMeta (`None` なら攻撃判定なし)。
+    /// attack 系 system はこの値で「今この frame で AttackBox を生やすか」を判定し、
+    /// hit 解決時の damage / knockback / hit_stop もここから引く。
+    #[must_use]
+    pub fn current_attack_meta(&self) -> Option<&AttackBoxMeta> {
+        self.frames
+            .get(self.current)
+            .and_then(|f| f.attack_meta.as_ref())
+    }
+
+    /// 現在 frame の damage 量 (`None` なら攻撃判定なし)。`current_attack_meta` の派生。
     #[must_use]
     pub fn current_attack_damage(&self) -> Option<u32> {
-        self.frames.get(self.current).and_then(|f| f.attack_damage)
+        self.current_attack_meta().map(|m| m.damage)
     }
 
     /// 現在 frame の AttackBox 幾何 (画像 pixel 内 HitBox)。
@@ -163,11 +170,10 @@ impl AnimationFrames {
 
     /// 現在 frame で active な hit_stop 演出パラメータ (`None` で hit_stop なし)。
     /// attack 系 system はヒット解決時にこれを参照して duration と impact/shake を決める。
+    /// `current_attack_meta` の派生。
     #[must_use]
     pub fn current_attack_hit_stop(&self) -> Option<HitStop> {
-        self.frames
-            .get(self.current)
-            .and_then(|f| f.attack_hit_stop)
+        self.current_attack_meta().and_then(|m| m.hit_stop)
     }
 
     /// `frames[0].duration` (ms)。被弾側の Hit アニメ frame 0 を「のけぞり pose」と捉え、
@@ -310,11 +316,10 @@ mod tests {
             duration: Duration::from_millis(ms),
             flip_x: false,
             alpha: 1.0,
-            attack_damage: None,
+            attack_meta: None,
             attack_box_geom: None,
             body_box_geoms: Vec::new(),
             sprite_pivot: [0, 0],
-            attack_hit_stop: None,
         }
     }
 
@@ -377,7 +382,10 @@ mod tests {
     #[test]
     fn current_attack_damage_returns_frame_value() {
         let mut f = dummy_frame(100);
-        f.attack_damage = Some(40);
+        f.attack_meta = Some(AttackBoxMeta {
+            damage: 40,
+            ..AttackBoxMeta::default()
+        });
         let frames = AnimationFrames::new(vec![f, dummy_frame(100)], false, 0);
         assert_eq!(frames.current_attack_damage(), Some(40));
     }
@@ -386,6 +394,20 @@ mod tests {
     fn current_attack_damage_none_when_unset() {
         let frames = AnimationFrames::new(vec![dummy_frame(100); 2], false, 0);
         assert_eq!(frames.current_attack_damage(), None);
+    }
+
+    #[test]
+    fn current_attack_meta_returns_full_meta() {
+        let mut f = dummy_frame(100);
+        f.attack_meta = Some(AttackBoxMeta {
+            damage: 20,
+            knockback_damage: 30,
+            ..AttackBoxMeta::default()
+        });
+        let frames = AnimationFrames::new(vec![f], false, 0);
+        let meta = frames.current_attack_meta().expect("should be set");
+        assert_eq!(meta.damage, 20);
+        assert_eq!(meta.knockback_damage, 30);
     }
 
     #[test]

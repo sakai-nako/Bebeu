@@ -9,6 +9,7 @@ mod animation;
 mod attack;
 mod hit_stop;
 mod hitbox_debug;
+mod knockback;
 mod movement;
 mod state_machine;
 // 将来の追加先 (雛形のみ。中身が育ったら個別に pub use を増やす)。
@@ -22,6 +23,7 @@ pub use attack::{
 };
 pub use hit_stop::{HitStopPlugin, HitStopState};
 pub use hitbox_debug::{HitboxDebugEnabled, HitboxDebugPlugin};
+pub use knockback::{Combatant, FinalAction, KinematicVel, KnockbackPlugin, PhysicsParams};
 pub use movement::{
     Enemy, Facing, MainCamera, MovementPlugin, Player, WorldPosition, flip_anchor, total_flip_x,
 };

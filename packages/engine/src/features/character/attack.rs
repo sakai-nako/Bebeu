@@ -1,35 +1,41 @@
 //! Attack hit 判定 (FSD: feature slice)。
 //!
-//! 最小実装方針:
+//! ADR-0024 Phase A + B:
 //! - [`AttackBox`] / [`BodyBox`] は world 座標 (画像ピクセル, ADR-0023) で表す軸並行ボックス。
-//!   Box の幾何 (中心 / half-extent) は今はまだ engine 内 default。YAML から画像 pixel →
-//!   world XYZ への変換は次の踏み出しで導入する。
-//! - Player が [`CharacterState::Attack`] かつ frame の `attack_box_overrides` が active な
-//!   とき (= `AnimationFrames::current_attack_damage` が `Some`) だけ player の前方に
-//!   AttackBox を生やし、全 [`Enemy`] の BodyBox と AABB 判定する。
-//! - ヒットしたら `current_attack_damage()` のダメージ ([`DEFAULT_ATTACK_DAMAGE`] は YAML 未
-//!   指定時の fallback) を [`HitPoints`] から減算し、HP > 0 なら `CharacterState::Hit` に
-//!   遷移、HP 0 で entity を despawn。
-//! - 1 attack で同じ enemy を多重 hit しないよう、player に [`AttackHitConsumed`] フラグを
-//!   持たせ、Attack state に入った瞬間に reset する (= 1 attack あたり 1 hit window で
-//!   1 ヒット限定)。吹っ飛び / Hit アニメは ADR-0024/0025 の本実装で別途。
+//!   形状は YAML 駆動 (`Frame.attack_box_overrides`)。fallback ジオメトリは frame に geom が
+//!   無いときの保険として残す。
+//! - Player が [`CharacterState::Attack`] かつ frame に attack_meta があるとき
+//!   (= `AnimationFrames::current_attack_meta` が `Some`) だけ player の前方に AttackBox を
+//!   生やし、全 [`Enemy`] の BodyBox と AABB 判定する。
+//! - ヒット時は `Combatant.gauge` を `meta.knockback_damage` で削り、`knockback_resistance`
+//!   で減衰させる。次のいずれかで **吹っ飛び発動** (`CharacterState::KnockbackUp` 遷移):
+//!     - gauge が枯れた (`<= 0`)
+//!     - 空中被弾 (pos.y > 0)
+//!     - 致命傷 (HP=0, Phase B)
+//!   発動時は `KinematicVel` に Facing 反転 + attenuation 済みの knockback ベクトルを
+//!   充填し、`remaining_bounces` / `gauge` を初期値に reset。致命傷なら `final_action=Dead`
+//!   を立てて [`super::knockback::advance_stage_timer`] が LieDown で永続停止させる。
+//! - 通常 Hit のときは `gauge_recovery_remaining_ticks` を立てる (間隔があけば自然回復)。
+//! - 既に死亡 (HP=0) している enemy は AABB チェックを skip。
+//! - 1 attack で同じ enemy を多重 hit しないよう、player に [`AttackHitConsumed`] フラグ。
 use bevy::prelude::*;
 
-use crate::entities::character::Role;
+use crate::entities::character::{AttackBoxMeta, KnockbackVec, Role};
 use crate::shared::projection::{WorldBox, world_box_from_hitbox};
 
 use super::animation::{AnimationFrames, AnimationSet};
 use super::hit_stop::HitStopState;
+use super::knockback::{Combatant, FinalAction, KinematicVel, PhysicsParams, ms_to_ticks};
 use super::movement::{Enemy, Facing, Player, WorldPosition};
 use super::state_machine::{CharacterState, EnemyAnimationSet};
 
 /// player が今 attack の hit frame に居て、AttackBox が active な状態かを判定する。
 /// 判定根拠は frame の `attack_box_overrides` の有無 (YAML 駆動)。`AnimationFrames` に
-/// 焼き込まれた `current_attack_damage()` を見て、`Some` なら hit active と扱う。
+/// 焼き込まれた `current_attack_meta()` を見て、`Some` なら hit active と扱う。
 /// `resolve_hits` (実際の当たり判定) と `hitbox_debug` (可視化) の両方から使う。
 #[must_use]
 pub fn is_attack_hit_active(state: CharacterState, anim: &AnimationFrames) -> bool {
-    matches!(state, CharacterState::Attack) && anim.current_attack_damage().is_some()
+    matches!(state, CharacterState::Attack) && anim.current_attack_meta().is_some()
 }
 
 /// player 中心から AttackBox 中心までの前方 X オフセット (画像ピクセル)。
@@ -43,10 +49,6 @@ const DEFAULT_BODY_HALF_Z: f32 = 8.0;
 const DEFAULT_ATTACK_HALF_X: f32 = 12.0;
 const DEFAULT_ATTACK_HALF_Y: f32 = 20.0;
 const DEFAULT_ATTACK_HALF_Z: f32 = 8.0;
-
-/// `AttackBoxMeta.damage` が YAML に書かれていない frame に当たった場合の fallback ダメージ。
-/// 通常は YAML 側 (attack_box_overrides[0].meta.damage) が指定する。
-pub const DEFAULT_ATTACK_DAMAGE: u32 = 50;
 
 /// 被弾耐久。`current = 0` で `is_dead`、その瞬間に entity が despawn される (`resolve_hits` 側)。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,12 +252,91 @@ fn reset_attack_hit_on_attack_start(
     }
 }
 
+/// `KnockbackResistance` で attenuation = `(1 - clamp(resistance, 0, 1)).max(0)` を計算する。
+/// damage / knockback_damage / 速度ベクトル全てに同じ係数を掛けて軽減する (ADR-0024)。
+#[must_use]
+fn attenuation(resistance: f32) -> f32 {
+    (1.0 - resistance.clamp(0.0, 1.0)).max(0.0)
+}
+
+/// `meta.knockback` を attacker `Facing` で符号反転し、attenuation を掛けた効果速度を返す。
+/// `Facing::Left` では vel_x の符号を反転する (`meta.vel_x` は「攻撃側前方 = +」基準)。
+#[must_use]
+fn effective_knockback(
+    knockback: KnockbackVec,
+    attacker_facing: Facing,
+    attenuation: f32,
+) -> KnockbackVec {
+    let sign = match attacker_facing {
+        Facing::Right => 1.0,
+        Facing::Left => -1.0,
+    };
+    KnockbackVec {
+        vel_x: knockback.vel_x * sign * attenuation,
+        vel_y: knockback.vel_y * attenuation,
+        vel_z: knockback.vel_z * attenuation,
+    }
+}
+
+/// ADR-0025: 被弾者が自分の正面方向に飛ぶ = 背中を押された = 背後被弾。
+/// `kb_vel_x` (= effective knockback の vel_x; 既に attacker Facing で符号反転済み) と
+/// victim Facing の前方符号の積が正なら true。Vel_x = 0 (垂直のみの knockback) は false 扱い
+/// (= 正面被弾と同等)。
+#[must_use]
+fn is_hit_from_behind(kb_vel_x: f32, victim_facing: Facing) -> bool {
+    let defender_forward_sign = match victim_facing {
+        Facing::Right => 1.0,
+        Facing::Left => -1.0,
+    };
+    kb_vel_x * defender_forward_sign > 0.0
+}
+
+/// `meta` と attacker `Facing` / 被弾側 `Combatant` / `Physics` から、当 hit で発生する
+/// 「damage / 吹っ飛び発動可否 / 効果速度」を決める。`Combatant.gauge` は副作用として
+/// この関数内で削るが、knockback 発動時の **gauge リセットは呼び出し側**で行う。
+struct HitOutcome {
+    damage: u32,
+    knockback: Option<KnockbackVec>,
+}
+
+fn decide_hit(
+    meta: &AttackBoxMeta,
+    attacker_facing: Facing,
+    victim_pos_y: f32,
+    combatant: &mut Combatant,
+    phys: &PhysicsParams,
+) -> HitOutcome {
+    let att = attenuation(phys.0.knockback_resistance);
+    // damage 値は u32 から f32 に乗せて係数を掛け、round で u32 に戻す。
+    // YAML 由来値は < 1e6 で f32 mantissa に余裕、係数は [0, 1] なので overflow しない。
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let damage = (f32::from(u16::try_from(meta.damage).unwrap_or(u16::MAX)) * att).round() as u32;
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    let kb_damage =
+        (f32::from(u16::try_from(meta.knockback_damage).unwrap_or(u16::MAX)) * att).round() as i32;
+    combatant.gauge = combatant.gauge.saturating_sub(kb_damage);
+    let airborne = victim_pos_y > 0.0;
+    let triggers_knockback = combatant.gauge <= 0 || airborne;
+    let knockback =
+        triggers_knockback.then(|| effective_knockback(meta.knockback, attacker_facing, att));
+    HitOutcome { damage, knockback }
+}
+
 /// player が Attack の hit frame に居れば AttackBox を作り、全 Enemy の BodyBox と AABB 判定。
-/// 当たった Enemy の HitPoints を [`DEFAULT_ATTACK_DAMAGE`] 減らし、HP 0 で despawn、
-/// それ以外なら `CharacterState::Hit` に遷移させる (sync_enemy_animation が Hit アニメに差替え、
-/// end_oneshot_actions が再生終了で Idle に戻す)。
-/// 1 attack で同 enemy を複数回叩かないよう、最初のヒットで [`AttackHitConsumed`] を立てて
-/// 同 attack window 中は判定を skip する (= 1 attack 1 hit)。
+/// ヒットしたら `decide_hit` の結果で:
+/// - 致命傷 (HP=0) → **knockback 強制発動 + `final_action = Dead`** (Phase B)。
+///   `decide_hit` が knockback を返さなかった場合でも meta.knockback を attenuation して充填。
+/// - knockback 発動 → `KinematicVel` 充填 + `CharacterState::KnockbackUp` + `Combatant.gauge`
+///   を threshold に戻す + `remaining_bounces` を `max_bounce_count` に reset
+/// - 通常 hit → `CharacterState::Hit` + `Combatant.gauge_recovery_remaining_ticks` を立てる
+///
+/// hit_stop は **通常 Hit 経路のみ** で適用する (knockback 発動時は hit_stop 無しで即遷移)。
+/// 既に死亡 (HP=0) している enemy は AABB チェック前に skip し、二重 hit を防ぐ。
+/// 1 attack で同 enemy を複数回叩かないよう、最初のヒットで [`AttackHitConsumed`] を立てる。
 fn resolve_hits(
     mut commands: Commands,
     // Player / Enemy が同 entity に同時に attach されることは無い前提だが、Bevy の static
@@ -276,9 +357,14 @@ fn resolve_hits(
         (
             Entity,
             &BodyBox,
+            &WorldPosition,
+            &Facing,
             &mut HitPoints,
             &mut CharacterState,
             &EnemyAnimationSet,
+            &mut Combatant,
+            &PhysicsParams,
+            &mut KinematicVel,
         ),
         (With<Enemy>, Without<Player>),
     >,
@@ -288,12 +374,9 @@ fn resolve_hits(
         if !is_attack_hit_active(*state, anim) || consumed.0 {
             continue;
         }
-        let damage = anim
-            .current_attack_damage()
-            .unwrap_or(DEFAULT_ATTACK_DAMAGE);
-        // YAML 駆動: attack_box_overrides[0].hitbox を world XYZ に変換して使う。
-        // attack_box_geom が無い frame で hit window が立つことは想定外だが、
-        // fallback として hardcoded geometry を維持する。
+        let Some(meta) = anim.current_attack_meta().copied() else {
+            continue;
+        };
         // sync_body_box / sync_transform と揃えて integer snap (pixel grid 上で当たり判定)。
         let (sx, sy, sz) = (pos.x.round(), pos.y.round(), pos.z.round());
         let attack_box = anim.current_attack_box_geom().map_or_else(
@@ -310,28 +393,82 @@ fn resolve_hits(
                 ))
             },
         );
-        let attack_hit_stop = anim.current_attack_hit_stop();
-        for (enemy_entity, body, mut hp, mut enemy_state, enemy_anims) in &mut enemy_query {
+        for (
+            enemy_entity,
+            body,
+            enemy_pos,
+            enemy_facing,
+            mut hp,
+            mut enemy_state,
+            enemy_anims,
+            mut combatant,
+            phys,
+            mut vel,
+        ) in &mut enemy_query
+        {
+            // 既に死亡している enemy は AABB チェックすら不要。攻撃判定の二重発火と、
+            // KO 演出 (LieDown 永続停止) 中の再被弾を両方避ける。
+            if hp.is_dead() {
+                continue;
+            }
             if !aabb_intersects(&attack_box, body) {
                 continue;
             }
-            hp.damage(damage);
             consumed.0 = true;
+            let outcome = decide_hit(&meta, *facing, enemy_pos.y, &mut combatant, phys);
+            hp.damage(outcome.damage);
+            let lethal = hp.is_dead();
             tracing::info!(
                 enemy = ?enemy_entity,
-                damage,
+                damage = outcome.damage,
                 remaining = hp.current,
+                gauge = combatant.gauge,
+                lethal,
                 "attack: hit",
             );
-            if hp.is_dead() {
-                tracing::info!(enemy = ?enemy_entity, "attack: enemy defeated");
-                commands.entity(enemy_entity).despawn();
+            // 致命傷は decide_hit の判定 (gauge / 空中) を上書きして必ず knockback 発動。
+            let knockback = outcome.knockback.or_else(|| {
+                lethal.then(|| {
+                    effective_knockback(
+                        meta.knockback,
+                        *facing,
+                        attenuation(phys.0.knockback_resistance),
+                    )
+                })
+            });
+            if let Some(kb) = knockback {
+                // 吹っ飛び発動: KinematicVel に充填、state を KnockbackUp に、gauge と
+                // remaining_bounces を初期値に reset。lethal なら final_action=Dead を立て、
+                // advance_stage_timer が LieDown 到達時に永続停止させる。
+                // hit_from_behind は victim Facing と kb.vel_x の関係から判定 (ADR-0025):
+                // 被弾者が自分の前方に飛ぶ = 背中側を押された。
+                // knockback 経路では hit_stop を適用しない (Phase A の簡略化を維持)。
+                vel.vel_x = kb.vel_x;
+                vel.vel_y = kb.vel_y;
+                vel.vel_z = kb.vel_z;
+                combatant.gauge = i32::try_from(phys.0.knockback_threshold).unwrap_or(i32::MAX);
+                combatant.gauge_recovery_remaining_ticks = 0;
+                combatant.remaining_bounces = phys.0.max_bounce_count;
+                combatant.final_action = if lethal {
+                    FinalAction::Dead
+                } else {
+                    FinalAction::LieDown
+                };
+                combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, *enemy_facing);
+                *enemy_state = CharacterState::KnockbackUp;
+                tracing::info!(
+                    enemy = ?enemy_entity,
+                    vel_x = kb.vel_x, vel_y = kb.vel_y, vel_z = kb.vel_z,
+                    final_action = ?combatant.final_action,
+                    hit_from_behind = combatant.hit_from_behind,
+                    "attack: knockback triggered",
+                );
             } else {
+                // 通常 Hit (のけぞり): gauge_recovery_remaining_ticks を立てて、間隔を空ければ
+                // 自然回復する。hit_stop は attack 側 meta.hit_stop の指定通りに発動。
                 *enemy_state = CharacterState::Hit;
-                // hit_stop decide: attack 側の hit_stop.duration_ms があればそれ、
-                // 無ければ enemy の Hit アニメ frame 0 duration を fallback。両方無ければ
-                // hit_stop なし (= 従来通り即 Hit アニメ再生)。
-                if let Some(hs) = attack_hit_stop {
+                combatant.gauge_recovery_remaining_ticks = ms_to_ticks(phys.0.hit_recovery_ms);
+                if let Some(hs) = meta.hit_stop {
                     let fallback_ms = enemy_anims
                         .get(Role::Hit)
                         .and_then(|data| data.frames.first())
@@ -443,6 +580,176 @@ mod tests {
         hp.damage(50);
         assert_eq!(hp.current, 0);
         assert!(hp.is_dead());
+    }
+
+    use crate::entities::character::Physics;
+
+    fn meta(damage: u32, knockback_damage: u32, vel_x: f32, vel_y: f32) -> AttackBoxMeta {
+        AttackBoxMeta {
+            damage,
+            knockback_damage,
+            knockback: KnockbackVec {
+                vel_x,
+                vel_y,
+                vel_z: 0.0,
+            },
+            ..AttackBoxMeta::default()
+        }
+    }
+
+    fn physics_with(resistance: f32, threshold: u32) -> PhysicsParams {
+        PhysicsParams(Physics {
+            knockback_resistance: resistance,
+            knockback_threshold: threshold,
+            ..Physics::default()
+        })
+    }
+
+    fn combatant_with(gauge: i32) -> Combatant {
+        Combatant {
+            gauge,
+            gauge_recovery_remaining_ticks: 0,
+            stage_timer_ticks: 0,
+            remaining_bounces: 0,
+            final_action: FinalAction::default(),
+            hit_from_behind: false,
+        }
+    }
+
+    #[test]
+    fn attenuation_full_at_zero_resistance() {
+        assert!((attenuation(0.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn attenuation_zero_at_full_resistance() {
+        assert!((attenuation(1.0) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn attenuation_clamps_below_zero() {
+        // 不正な負 resistance も >1 と同じく clamp。
+        assert!((attenuation(-0.5) - 1.0).abs() < f32::EPSILON);
+        assert!((attenuation(2.0) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn effective_knockback_flips_x_when_attacker_faces_left() {
+        let kb = KnockbackVec {
+            vel_x: 120.0,
+            vel_y: 80.0,
+            vel_z: 0.0,
+        };
+        let right = effective_knockback(kb, Facing::Right, 1.0);
+        assert!((right.vel_x - 120.0).abs() < f32::EPSILON);
+        let left = effective_knockback(kb, Facing::Left, 1.0);
+        assert!((left.vel_x + 120.0).abs() < f32::EPSILON);
+        // vel_y は flip しない
+        assert!((left.vel_y - 80.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn is_hit_from_behind_is_true_when_kb_pushes_in_facing_direction() {
+        // Facing::Right の被弾者 (前方 = +X) が +X 方向に飛ぶ = 背中側を押された。
+        assert!(is_hit_from_behind(120.0, Facing::Right));
+        // Facing::Left の被弾者 (前方 = -X) が -X 方向に飛ぶ = 背中側を押された。
+        assert!(is_hit_from_behind(-120.0, Facing::Left));
+    }
+
+    #[test]
+    fn is_hit_from_behind_is_false_when_kb_pushes_against_facing() {
+        // Facing::Right が -X 方向に飛ぶ = 正面から殴られて後ろに吹っ飛ばされた。
+        assert!(!is_hit_from_behind(-120.0, Facing::Right));
+        // Facing::Left が +X 方向に飛ぶ = 同じく正面被弾。
+        assert!(!is_hit_from_behind(120.0, Facing::Left));
+    }
+
+    #[test]
+    fn is_hit_from_behind_is_false_for_pure_vertical_knockback() {
+        // 垂直のみ knockback (vel_x=0) は方向区別なし → 正面扱い。
+        assert!(!is_hit_from_behind(0.0, Facing::Right));
+        assert!(!is_hit_from_behind(0.0, Facing::Left));
+    }
+
+    #[test]
+    fn effective_knockback_scales_by_attenuation() {
+        let kb = KnockbackVec {
+            vel_x: 100.0,
+            vel_y: 50.0,
+            vel_z: 20.0,
+        };
+        let half = effective_knockback(kb, Facing::Right, 0.5);
+        assert!((half.vel_x - 50.0).abs() < f32::EPSILON);
+        assert!((half.vel_y - 25.0).abs() < f32::EPSILON);
+        assert!((half.vel_z - 10.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn decide_hit_returns_no_knockback_when_gauge_remains() {
+        let mut combatant = combatant_with(100);
+        let phys = physics_with(0.0, 100);
+        // 30 削っても gauge=70 残るので吹っ飛び発動しない (地上)
+        let outcome = decide_hit(
+            &meta(20, 30, 120.0, 80.0),
+            Facing::Right,
+            0.0,
+            &mut combatant,
+            &phys,
+        );
+        assert!(outcome.knockback.is_none());
+        assert_eq!(outcome.damage, 20);
+        assert_eq!(combatant.gauge, 70);
+    }
+
+    #[test]
+    fn decide_hit_triggers_knockback_when_gauge_depleted() {
+        let mut combatant = combatant_with(20);
+        let phys = physics_with(0.0, 100);
+        // 30 削ると gauge=-10 で発動
+        let outcome = decide_hit(
+            &meta(20, 30, 120.0, 80.0),
+            Facing::Right,
+            0.0,
+            &mut combatant,
+            &phys,
+        );
+        let kb = outcome.knockback.expect("knockback should fire");
+        assert!((kb.vel_x - 120.0).abs() < f32::EPSILON);
+        assert!(combatant.gauge <= 0);
+    }
+
+    #[test]
+    fn decide_hit_triggers_knockback_when_airborne() {
+        let mut combatant = combatant_with(100);
+        let phys = physics_with(0.0, 100);
+        // gauge は十分残っていても、空中被弾なら必ず発動
+        let outcome = decide_hit(
+            &meta(20, 1, 120.0, 80.0),
+            Facing::Right,
+            10.0,
+            &mut combatant,
+            &phys,
+        );
+        assert!(outcome.knockback.is_some());
+    }
+
+    #[test]
+    fn decide_hit_applies_resistance_to_damage_and_knockback() {
+        let mut combatant = combatant_with(100);
+        // resistance=0.5 → attenuation=0.5
+        let phys = physics_with(0.5, 100);
+        let outcome = decide_hit(
+            &meta(40, 60, 100.0, 80.0),
+            Facing::Right,
+            0.0,
+            &mut combatant,
+            &phys,
+        );
+        assert_eq!(outcome.damage, 20); // 40 * 0.5
+        // gauge: 100 - (60 * 0.5) = 70
+        assert_eq!(combatant.gauge, 70);
+        // 70 > 0 で発動しない
+        assert!(outcome.knockback.is_none());
     }
 
     #[test]

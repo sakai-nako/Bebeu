@@ -14,8 +14,8 @@ use bevy::window::WindowResolution;
 use super::pixel_perfect::{PixelPerfectConfig, PixelPerfectRenderPlugin};
 use crate::entities::project::Project;
 use crate::features::character::{
-    AnimationPlugin, AttackPlugin, HitStopPlugin, HitboxDebugPlugin, MovementPlugin,
-    StateMachinePlugin,
+    AnimationPlugin, AttackPlugin, HitStopPlugin, HitboxDebugPlugin, KnockbackPlugin,
+    MovementPlugin, StateMachinePlugin,
 };
 use crate::scenes::{battle, result, title};
 use crate::shared::config::{EngineConfig, RuntimePaths, WindowConfig};
@@ -79,6 +79,7 @@ pub fn register_engine_plugins(app: &mut App) -> &mut App {
         .add_plugins(StateMachinePlugin)
         .add_plugins(AttackPlugin)
         .add_plugins(HitStopPlugin)
+        .add_plugins(KnockbackPlugin)
         .add_plugins(HitboxDebugPlugin)
         .add_plugins(PixelPerfectRenderPlugin)
         .add_plugins(title::TitleScenePlugin)
