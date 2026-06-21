@@ -1,0 +1,38 @@
+name: down_attack
+number: 12
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [14, 22]
+    bottom_right: [34, 60]
+    depth: 16
+  attack_boxes: null
+- index: 1
+  path: 002.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [14, 22]
+    bottom_right: [34, 60]
+    depth: 16
+  attack_boxes:
+  - hitbox:
+      top_left:
+      - 32
+      - 78
+      bottom_right:
+      - 48
+      - 90
+      depth: 16
+    meta:
+      damage: 12
+      knockback_damage: 25
+      knockback:
+        vel_x: 40.0
+        vel_y: 280.0
+        vel_z: 0.0

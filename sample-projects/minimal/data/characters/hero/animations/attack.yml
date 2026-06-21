@@ -24,11 +24,11 @@ frames:
   body_box_overrides: null
   attack_box_overrides:
   - meta:
-      damage: 20
-      knockback_damage: 1
+      damage: 10
+      knockback_damage: 40
       knockback:
-        vel_x: 0.0
-        vel_y: 0.0
+        vel_x: 40.0
+        vel_y: 320.0
         vel_z: 0.0
       hit_stop:
         shake_x: -5

@@ -18,12 +18,20 @@ pub const DEFAULT_HP: u32 = 100;
 pub const DEFAULT_GRAVITY: f64 = 800.0;
 pub const DEFAULT_JUMP_VELOCITY_Y: f64 = 200.0;
 pub const DEFAULT_KNOCKBACK_THRESHOLD: u32 = 100;
-pub const DEFAULT_MAX_BOUNCE_COUNT: u32 = 1;
+pub const DEFAULT_BOUNCE_COUNT: u32 = 1;
 pub const DEFAULT_BOUNCE_DAMPENING: f32 = 0.5;
 pub const DEFAULT_GROUND_FRICTION: f64 = 600.0;
 pub const DEFAULT_HIT_RECOVERY_MS: u32 = 1500;
 pub const DEFAULT_LIE_DOWN_DURATION_MS: u32 = 800;
 pub const DEFAULT_RISE_DURATION_MS: u32 = 300;
+/// 1 連続コンボあたりの空中再被弾 (= ジャグル) 最大回数。これを超えた airborne hit は
+/// **完全無敵** (damage / state / gauge / consumed 全て不発) で素通りする (= 敵を当て続けても
+/// 落下フローが進む。永久パターン回避)。
+pub const DEFAULT_MAX_JUGGLE_COUNT: u32 = 3;
+/// 1 連続コンボあたりの DownHit (= 倒れ中被弾) 最大回数。これを超えた down hit は
+/// **完全無敵** (damage / state / gauge / consumed 全て不発) で素通りする (= 倒れたまま無敵、
+/// 永久パターン回避)。
+pub const DEFAULT_MAX_DOWN_HIT_COUNT: u32 = 3;
 
 // === Role ===
 
@@ -74,6 +82,11 @@ pub enum Role {
     DeadBackBounceDown,
     DeadBackSlide,
     DeadBackLieDown,
+    /// Down 中 (Slide / LieDown / Rise) に被弾したときの地上 hit ポーズ。Hit が立ちポーズ
+    /// 前提なので、地面に伏せている被弾には別 role を割り当てる。
+    DownHit,
+    /// 下段攻撃ポーズ (`K` キー)。AttackBox を低位置に置いて倒れた敵 (LieDown) に当てる用。
+    DownAttack,
     #[default]
     Custom,
 }
@@ -116,6 +129,8 @@ impl Role {
             Role::DeadBackBounceDown,
             Role::DeadBackSlide,
             Role::DeadBackLieDown,
+            Role::DownHit,
+            Role::DownAttack,
         ]
     }
 }
@@ -133,7 +148,7 @@ pub struct Physics {
     #[serde(default)]
     pub knockback_resistance: f32,
     #[serde(default)]
-    pub max_bounce_count: u32,
+    pub bounce_count: u32,
     #[serde(default)]
     pub bounce_dampening: f32,
     #[serde(default)]
@@ -144,6 +159,18 @@ pub struct Physics {
     pub lie_down_duration_ms: u32,
     #[serde(default)]
     pub rise_duration_ms: u32,
+    /// 1 連続コンボあたりの空中再被弾 (ジャグル) 最大回数。`Combatant.juggle_count` がこれを
+    /// 超えた airborne hit は **完全無敵** (damage / state / gauge / consumed 全て不発、
+    /// AABB ヒットしても素通り) になる (= 永久パターン回避)。
+    /// Rise → Idle で counter は reset される。
+    #[serde(default)]
+    pub max_juggle_count: u32,
+    /// 1 連続コンボあたりの DownHit 最大回数。`Combatant.down_hit_count` がこれを超えた
+    /// down hit は **完全無敵** (damage / state / gauge / consumed 全て不発、AABB ヒットしても
+    /// 素通り) になる (= 倒れたまま無敵、永久パターン回避)。
+    /// Rise → Idle で counter は reset される。
+    #[serde(default)]
+    pub max_down_hit_count: u32,
 }
 
 impl Default for Physics {
@@ -153,12 +180,14 @@ impl Default for Physics {
             jump_velocity_y: DEFAULT_JUMP_VELOCITY_Y,
             knockback_threshold: DEFAULT_KNOCKBACK_THRESHOLD,
             knockback_resistance: 0.0,
-            max_bounce_count: DEFAULT_MAX_BOUNCE_COUNT,
+            bounce_count: DEFAULT_BOUNCE_COUNT,
             bounce_dampening: DEFAULT_BOUNCE_DAMPENING,
             ground_friction: DEFAULT_GROUND_FRICTION,
             hit_recovery_ms: DEFAULT_HIT_RECOVERY_MS,
             lie_down_duration_ms: DEFAULT_LIE_DOWN_DURATION_MS,
             rise_duration_ms: DEFAULT_RISE_DURATION_MS,
+            max_juggle_count: DEFAULT_MAX_JUGGLE_COUNT,
+            max_down_hit_count: DEFAULT_MAX_DOWN_HIT_COUNT,
         }
     }
 }
@@ -444,12 +473,14 @@ mod tests {
         assert_eq!(p.jump_velocity_y, DEFAULT_JUMP_VELOCITY_Y);
         assert_eq!(p.knockback_threshold, DEFAULT_KNOCKBACK_THRESHOLD);
         assert_eq!(p.knockback_resistance, 0.0);
-        assert_eq!(p.max_bounce_count, DEFAULT_MAX_BOUNCE_COUNT);
+        assert_eq!(p.bounce_count, DEFAULT_BOUNCE_COUNT);
         assert_eq!(p.bounce_dampening, DEFAULT_BOUNCE_DAMPENING);
         assert_eq!(p.ground_friction, DEFAULT_GROUND_FRICTION);
         assert_eq!(p.hit_recovery_ms, DEFAULT_HIT_RECOVERY_MS);
         assert_eq!(p.lie_down_duration_ms, DEFAULT_LIE_DOWN_DURATION_MS);
         assert_eq!(p.rise_duration_ms, DEFAULT_RISE_DURATION_MS);
+        assert_eq!(p.max_juggle_count, DEFAULT_MAX_JUGGLE_COUNT);
+        assert_eq!(p.max_down_hit_count, DEFAULT_MAX_DOWN_HIT_COUNT);
     }
 
     #[test]

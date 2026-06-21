@@ -19,6 +19,7 @@ use bevy::prelude::*;
 
 use crate::shared::projection;
 
+use super::debug_control::SimulationSet;
 use super::movement::{Facing, WorldPosition};
 
 /// hit_stop 中の entity に attach される component。`remaining_ms` が 0 を切ったら
@@ -75,7 +76,7 @@ pub struct HitStopPlugin;
 impl Plugin for HitStopPlugin {
     fn build(&self, app: &mut App) {
         // movement::sync_transform より後に走らせる必要があるので PostUpdate。
-        app.add_systems(PostUpdate, update_hit_stop);
+        app.add_systems(PostUpdate, update_hit_stop.in_set(SimulationSet::Active));
     }
 }
 

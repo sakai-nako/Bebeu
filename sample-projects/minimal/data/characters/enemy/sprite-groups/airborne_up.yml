@@ -1,0 +1,13 @@
+name: airborne_up
+number: 5
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [12, 18]
+    bottom_right: [38, 70]
+    depth: 16
+  attack_boxes: null

@@ -60,6 +60,20 @@ fn write_character(root: &Path, name: &str, palette: &CharacterPalette) -> Resul
     write_sprite(&base, "attack", 2, 1, palette)?;
     write_sprite(&base, "hit", 1, 0, palette)?;
     write_sprite(&base, "thumbnail", 1, 0, palette)?;
+    // 吹っ飛び flow 用 placeholder (ADR-0024/0025)。1 sprite per group の最小構成。
+    // knockback_up/down と bounce_up/down は同じ airborne sprite を animation YAML 経由で
+    // 共有する (= sprite-group は 6 個、animation は 8 個)。
+    write_sprite(&base, "airborne_up", 1, 0, palette)?;
+    write_sprite(&base, "airborne_down", 1, 0, palette)?;
+    write_sprite(&base, "slide", 1, 0, palette)?;
+    write_sprite(&base, "lie_down", 1, 0, palette)?;
+    write_sprite(&base, "rise", 1, 0, palette)?;
+    write_sprite(&base, "dead_lie_down", 1, 0, palette)?;
+    // DownHit (Phase D2): 地上 hit pose。
+    write_sprite(&base, "down_hit", 1, 0, palette)?;
+    // DownAttack (Phase E2): 足元の AttackBox を持つ下段攻撃 pose。
+    write_sprite(&base, "down_attack", 1, 0, palette)?;
+    write_sprite(&base, "down_attack", 2, 1, palette)?;
     Ok(())
 }
 
@@ -78,6 +92,14 @@ fn write_sprite(
     let pixels = match group {
         "attack" => render_attack_sprite(palette, phase),
         "hit" => render_hit_sprite(palette),
+        "airborne_up" => render_airborne_sprite(palette, false),
+        "airborne_down" => render_airborne_sprite(palette, true),
+        "slide" => render_slide_sprite(palette),
+        "lie_down" => render_lie_down_sprite(palette, false),
+        "rise" => render_rise_sprite(palette),
+        "dead_lie_down" => render_lie_down_sprite(palette, true),
+        "down_hit" => render_down_hit_sprite(palette),
+        "down_attack" => render_down_attack_sprite(palette, phase),
         _ => render_character_sprite(palette, phase),
     };
     write_png(&path, SPRITE_W, SPRITE_H, &pixels)
@@ -146,6 +168,121 @@ fn render_hit_sprite(palette: &CharacterPalette) -> Vec<u8> {
     fill_rect(&mut buf, 4, 32 + body_dy, 6, 16, palette.body);
     fill_rect(&mut buf, 38, 32 + body_dy, 6, 16, palette.body);
 
+    buf
+}
+
+/// 吹っ飛び中 (空中) の sprite。`falling=false` = 上昇 (KnockbackUp / BounceUp 用)、
+/// `falling=true` = 下降 (KnockbackDown / BounceDown 用)。
+/// 上昇は腕を上に、下降は腕を下に流して空中感を出す。
+fn render_airborne_sprite(palette: &CharacterPalette, falling: bool) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    // 体は通常より少し縮める (浮いている感)
+    let body_y = 22;
+    let head_y = if falling { 18 } else { 10 };
+    fill_rect(&mut buf, 16, head_y, 16, 14, palette.head);
+    fill_rect(&mut buf, 14, body_y, 20, 28, palette.body);
+    fill_rect(&mut buf, 14, body_y + 22, 20, 4, palette.accent);
+    // 脚は両側に広がる (空中フェーズ)
+    fill_rect(&mut buf, 12, body_y + 28, 6, 18, palette.body);
+    fill_rect(&mut buf, 30, body_y + 28, 6, 18, palette.body);
+    // 腕の角度を上昇 / 下降で変える
+    if falling {
+        // 下降: 腕を背後・下方向に流す
+        fill_rect(&mut buf, 4, body_y + 14, 10, 4, palette.body);
+        fill_rect(&mut buf, 34, body_y + 14, 10, 4, palette.body);
+    } else {
+        // 上昇: 腕を上方向に上げる
+        fill_rect(&mut buf, 8, body_y - 8, 6, 12, palette.body);
+        fill_rect(&mut buf, 34, body_y - 8, 6, 12, palette.body);
+    }
+    buf
+}
+
+/// `Slide` 用 sprite (地面に体を横たえて滑っている)。pivot は `(24, 90)` 前提。
+/// 体を完全に横向きにする (頭が画面右、足が左)。
+fn render_slide_sprite(palette: &CharacterPalette) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    let y_top = 76; // 地面 (pivot=90) のすぐ上
+    // 体: 横長
+    fill_rect(&mut buf, 4, y_top + 2, 32, 10, palette.body);
+    fill_rect(&mut buf, 4, y_top, 32, 2, palette.accent);
+    // 頭: 右端
+    fill_rect(&mut buf, 34, y_top, 12, 12, palette.head);
+    // 腕 (流れて後方): 左側
+    fill_rect(&mut buf, 0, y_top + 4, 6, 4, palette.body);
+    buf
+}
+
+/// `LieDown` / `DeadLieDown` 用 sprite。`dead=false` で通常の倒れポーズ、
+/// `dead=true` でアクセント色の X 印を頭部に乗せる (KO 演出)。
+fn render_lie_down_sprite(palette: &CharacterPalette, dead: bool) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    let y_top = 78;
+    // 体: 完全に横たわる
+    fill_rect(&mut buf, 6, y_top + 2, 30, 8, palette.body);
+    fill_rect(&mut buf, 6, y_top, 30, 2, palette.accent);
+    // 頭: 右端
+    fill_rect(&mut buf, 34, y_top, 12, 12, palette.head);
+    if dead {
+        // X 目印 (KO): アクセント色で 2 本のラインを頭の中央に交差させる
+        fill_rect(&mut buf, 36, y_top + 3, 8, 2, palette.accent);
+        fill_rect(&mut buf, 36, y_top + 7, 8, 2, palette.accent);
+    }
+    buf
+}
+
+/// 下段攻撃 sprite。phase 0 = しゃがみ構え、phase 1 = 前方下方に拳を突き出す。
+/// AttackBox は YAML 側で `top_left:[32, 78], bottom_right:[48, 90]` の足元位置にセット
+/// (= 倒れた敵の lie_down body box (world Y 0-14) と Y 範囲が overlap、立ち body box には
+/// 当たらない設計)。
+fn render_down_attack_sprite(palette: &CharacterPalette, phase: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    let extend: i32 = if phase == 0 { 0 } else { 10 };
+    // しゃがみ姿勢: 通常よりちょっと低い
+    fill_rect(&mut buf, 16, 22, 16, 14, palette.head);
+    fill_rect(&mut buf, 14, 36, 20, 24, palette.body);
+    fill_rect(&mut buf, 14, 54, 20, 4, palette.accent);
+    // 屈んだ脚 (両方膝が前)
+    fill_rect(&mut buf, 14, 60, 6, 28, palette.body);
+    fill_rect(&mut buf, 28, 60, 6, 28, palette.body);
+    // 引き手 (左腕)
+    fill_rect(&mut buf, 10, 40, 4, 16, palette.body);
+    // 突き手 (右腕): phase で前方下に伸びる
+    fill_rect(&mut buf, 34, 72, 4 + extend, 6, palette.body);
+    fill_rect(&mut buf, 38 + extend, 76, 4, 10, palette.accent);
+    buf
+}
+
+/// `DownHit` 用 sprite。地面に伏せたまま hit を受けた瞬間のポーズ。lie_down ベースに
+/// 頭の jerk と腕の broadening で「衝撃が来た感」を出す。
+fn render_down_hit_sprite(palette: &CharacterPalette) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    let y_top = 78;
+    // 体: 横たわる (lie_down と同じ)
+    fill_rect(&mut buf, 6, y_top + 2, 30, 8, palette.body);
+    fill_rect(&mut buf, 6, y_top, 30, 2, palette.accent);
+    // 頭: 右端、ちょっと右に jerk (= 衝撃を受けた感)
+    fill_rect(&mut buf, 37, y_top - 1, 11, 12, palette.head);
+    // 腕: 衝撃で broaden (両側に少し広がる)
+    fill_rect(&mut buf, 0, y_top + 4, 8, 4, palette.body);
+    fill_rect(&mut buf, 4, y_top + 8, 4, 4, palette.body);
+    buf
+}
+
+/// `Rise` 用 sprite。半身を起こした kneeling ポーズ。idle と lie_down の中間。
+fn render_rise_sprite(palette: &CharacterPalette) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    // 頭: 半分立ち上がった位置 (idle より下、lie_down より上)
+    fill_rect(&mut buf, 16, 42, 16, 14, palette.head);
+    // 体: 縦寄りだが屈んでる
+    fill_rect(&mut buf, 14, 56, 20, 24, palette.body);
+    fill_rect(&mut buf, 14, 76, 20, 4, palette.accent);
+    // 片膝立ち: 左脚は地面、右脚は曲げる
+    fill_rect(&mut buf, 14, 80, 6, 8, palette.body); // 左脚 (地面に近い)
+    fill_rect(&mut buf, 24, 78, 12, 6, palette.body); // 右脚 (横に出る)
+    // 腕: 支え (左) と上向き (右、起き上がる勢い)
+    fill_rect(&mut buf, 8, 60, 6, 16, palette.body);
+    fill_rect(&mut buf, 32, 48, 6, 14, palette.body);
     buf
 }
 

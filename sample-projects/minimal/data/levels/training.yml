@@ -10,11 +10,11 @@ areas:
 camera_start_x: 0
 camera_start_y: 0
 player_spawn_x: 64
-player_spawn_z: 200
+player_spawn_z: 170
 player_respawn_y: 0
 opponent_triggers:
 - character_name: enemy
   trigger_x: 200
   spawn_x: 380
   spawn_y: 0
-  spawn_z: 200
+  spawn_z: 170

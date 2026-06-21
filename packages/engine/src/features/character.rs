@@ -7,10 +7,12 @@
 //! 実用的)。
 mod animation;
 mod attack;
+mod debug_control;
 mod hit_stop;
 mod hitbox_debug;
 mod knockback;
 mod movement;
+mod state_debug;
 mod state_machine;
 // 将来の追加先 (雛形のみ。中身が育ったら個別に pub use を増やす)。
 mod ai;
@@ -21,12 +23,14 @@ pub use animation::{
 pub use attack::{
     AttackBox, AttackHitConsumed, AttackPlugin, BodyBox, CharacterDepth, HitPoints, aabb_intersects,
 };
+pub use debug_control::{DebugControlPlugin, DebugPause, SimulationSet};
 pub use hit_stop::{HitStopPlugin, HitStopState};
 pub use hitbox_debug::{HitboxDebugEnabled, HitboxDebugPlugin};
 pub use knockback::{Combatant, FinalAction, KinematicVel, KnockbackPlugin, PhysicsParams};
 pub use movement::{
     Enemy, Facing, MainCamera, MovementPlugin, Player, WorldPosition, flip_anchor, total_flip_x,
 };
+pub use state_debug::{StateDebugEnabled, StateDebugPlugin};
 pub use state_machine::{
     AnimationData, CharacterState, EnemyAnimationSet, PlayerAnimationLibrary, StateMachinePlugin,
 };

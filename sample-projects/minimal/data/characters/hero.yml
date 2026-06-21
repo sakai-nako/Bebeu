@@ -7,7 +7,7 @@ physics:
   jump_velocity_y: 200.0
   knockback_threshold: 100
   knockback_resistance: 0.0
-  max_bounce_count: 1
+  bounce_count: 1
   bounce_dampening: 0.5
   ground_friction: 600.0
   hit_recovery_ms: 1500

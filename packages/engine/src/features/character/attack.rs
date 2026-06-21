@@ -24,6 +24,7 @@ use crate::entities::character::{AttackBoxMeta, KnockbackVec, Role};
 use crate::shared::projection::{WorldBox, world_box_from_hitbox};
 
 use super::animation::{AnimationFrames, AnimationSet};
+use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
 use super::knockback::{Combatant, FinalAction, KinematicVel, PhysicsParams, ms_to_ticks};
 use super::movement::{Enemy, Facing, Player, WorldPosition};
@@ -33,9 +34,11 @@ use super::state_machine::{CharacterState, EnemyAnimationSet};
 /// 判定根拠は frame の `attack_box_overrides` の有無 (YAML 駆動)。`AnimationFrames` に
 /// 焼き込まれた `current_attack_meta()` を見て、`Some` なら hit active と扱う。
 /// `resolve_hits` (実際の当たり判定) と `hitbox_debug` (可視化) の両方から使う。
+/// `Attack` / `DownAttack` 両方で active 扱い (= 違いは AttackBox 幾何だけ)。
 #[must_use]
 pub fn is_attack_hit_active(state: CharacterState, anim: &AnimationFrames) -> bool {
-    matches!(state, CharacterState::Attack) && anim.current_attack_meta().is_some()
+    matches!(state, CharacterState::Attack | CharacterState::DownAttack)
+        && anim.current_attack_meta().is_some()
 }
 
 /// player 中心から AttackBox 中心までの前方 X オフセット (画像ピクセル)。
@@ -133,6 +136,8 @@ impl AttackBox {
 
 /// world 座標で表される軸並行ボックス (中心 + half-extent)。被弾側。
 /// Component として attach し、`sync_body_box` system が WorldPosition に追従させる。
+/// `disabled=true` のとき hit 判定から外れる (ADR-0024 の BodyBox-driven 無敵)。
+/// 位置は通常通り更新されるので `hitbox_debug` overlay で「無敵 frame の枠線」を可視化できる。
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct BodyBox {
     pub center_x: f32,
@@ -141,6 +146,9 @@ pub struct BodyBox {
     pub half_x: f32,
     pub half_y: f32,
     pub half_z: f32,
+    /// `true` で `aabb_intersects` が false を返す (= 無敵 frame)。
+    /// ADR-0024: `Frame.body_box_overrides: []` (Disable) を author が指定したときに立つ。
+    pub disabled: bool,
 }
 
 impl BodyBox {
@@ -156,6 +164,7 @@ impl BodyBox {
             half_x: DEFAULT_BODY_HALF_X,
             half_y: DEFAULT_BODY_HALF_Y,
             half_z: DEFAULT_BODY_HALF_Z,
+            disabled: false,
         }
     }
 
@@ -169,13 +178,18 @@ impl BodyBox {
             half_x: b.half_x,
             half_y: b.half_y,
             half_z: b.half_z,
+            disabled: false,
         }
     }
 }
 
 /// XYZ 3 軸の AABB 重なり判定。境界 (面接触) は重なり扱い。
+/// `BodyBox.disabled=true` の被弾側は無条件で false (= 無敵 frame、ADR-0024)。
 #[must_use]
 pub fn aabb_intersects(a: &AttackBox, b: &BodyBox) -> bool {
+    if b.disabled {
+        return false;
+    }
     (a.center_x - b.center_x).abs() <= a.half_x + b.half_x
         && (a.center_y - b.center_y).abs() <= a.half_y + b.half_y
         && (a.center_z - b.center_z).abs() <= a.half_z + b.half_z
@@ -195,7 +209,8 @@ impl Plugin for AttackPlugin {
                 .chain()
                 // sync_body_box は現 frame の geom を使うので、tick で frame が進んだ後に
                 // 走らないと「旧 frame の body_box + 新 sprite」のミスマッチが起きる。
-                .after(AnimationSet::Tick),
+                .after(AnimationSet::Tick)
+                .in_set(SimulationSet::Active),
         );
     }
 }
@@ -218,7 +233,7 @@ fn sync_body_box(
         // フレームごとに 1 px ずれるパターンが出るのと、collision も pixel grid 上で
         // 起きる方が pixel art の挙動として直感的。
         let (sx, sy, sz) = (pos.x.round(), pos.y.round(), pos.z.round());
-        let new_box = match anim.current_body_boxes().first() {
+        let mut new_box = match anim.current_body_boxes().first() {
             Some(geom) => BodyBox::from_world_box(world_box_from_hitbox(
                 geom,
                 anim.current_sprite_pivot(),
@@ -230,6 +245,9 @@ fn sync_body_box(
             )),
             None => BodyBox::default_for_world(WorldPosition::new(sx, sy, sz)),
         };
+        // ADR-0024 BodyBox-driven 無敵: frame が `body_box_overrides: []` を持っているか。
+        // 位置情報自体は通常通り更新するので、hitbox_debug で「無敵中の枠線」を可視化できる。
+        new_box.disabled = anim.current_body_box_disabled();
         // Bevy の `Changed<>` をぶらさないため等価チェックして必要なときだけ書く
         if *body != new_box {
             *body = new_box;
@@ -237,8 +255,9 @@ fn sync_body_box(
     }
 }
 
-/// CharacterState が Attack に変わった瞬間 (Changed<CharacterState> で発火) に AttackHitConsumed を
-/// false に戻す。これで「次の attack で再度 hit window を消費できる」状態になる。
+/// CharacterState が Attack / DownAttack に変わった瞬間 (Changed<CharacterState> で発火) に
+/// AttackHitConsumed を false に戻す。これで「次の attack で再度 hit window を消費できる」
+/// 状態になる。
 fn reset_attack_hit_on_attack_start(
     mut query: Query<
         (&CharacterState, &mut AttackHitConsumed),
@@ -246,7 +265,7 @@ fn reset_attack_hit_on_attack_start(
     >,
 ) {
     for (state, mut consumed) in &mut query {
-        if matches!(state, CharacterState::Attack) {
+        if matches!(state, CharacterState::Attack | CharacterState::DownAttack) {
             consumed.0 = false;
         }
     }
@@ -331,7 +350,7 @@ fn decide_hit(
 /// - 致命傷 (HP=0) → **knockback 強制発動 + `final_action = Dead`** (Phase B)。
 ///   `decide_hit` が knockback を返さなかった場合でも meta.knockback を attenuation して充填。
 /// - knockback 発動 → `KinematicVel` 充填 + `CharacterState::KnockbackUp` + `Combatant.gauge`
-///   を threshold に戻す + `remaining_bounces` を `max_bounce_count` に reset
+///   を threshold に戻す + `remaining_bounces` を `bounce_count` に reset
 /// - 通常 hit → `CharacterState::Hit` + `Combatant.gauge_recovery_remaining_ticks` を立てる
 ///
 /// hit_stop は **通常 Hit 経路のみ** で適用する (knockback 発動時は hit_stop 無しで即遷移)。
@@ -414,6 +433,39 @@ fn resolve_hits(
             if !aabb_intersects(&attack_box, body) {
                 continue;
             }
+            // 永久パターン回避: cap 到達中の敵は「完全無敵」(damage / state / gauge / consumed
+            // 全てスキップ)。`continue` で次の enemy に進むので、同 swing 内で並んでいる
+            // 後ろの非 cap 敵には引き続き当たる (= 無敵敵を「素通り」して別の敵を当てに行ける)。
+            // decide_hit の前に判定するのは、decide_hit が gauge を副作用で削るため
+            // (= 無敵敵には gauge も触らせない)。致命傷も cap 中は通さない (= 倒れたまま
+            // 完全無敵フェーズ、再 KO 演出は走らない)。
+            let already_airborne = matches!(
+                *enemy_state,
+                CharacterState::KnockbackUp
+                    | CharacterState::KnockbackDown
+                    | CharacterState::BounceUp
+                    | CharacterState::BounceDown
+            );
+            let is_down = matches!(
+                *enemy_state,
+                CharacterState::Slide | CharacterState::LieDown | CharacterState::Rise
+            );
+            if already_airborne && combatant.juggle_count >= phys.0.max_juggle_count {
+                tracing::debug!(
+                    enemy = ?enemy_entity,
+                    juggle_count = combatant.juggle_count,
+                    "attack: juggle cap reached, hit nullified",
+                );
+                continue;
+            }
+            if is_down && combatant.down_hit_count >= phys.0.max_down_hit_count {
+                tracing::debug!(
+                    enemy = ?enemy_entity,
+                    down_hit_count = combatant.down_hit_count,
+                    "attack: down_hit cap reached, hit nullified",
+                );
+                continue;
+            }
             consumed.0 = true;
             let outcome = decide_hit(&meta, *facing, enemy_pos.y, &mut combatant, phys);
             hp.damage(outcome.damage);
@@ -448,25 +500,38 @@ fn resolve_hits(
                 vel.vel_z = kb.vel_z;
                 combatant.gauge = i32::try_from(phys.0.knockback_threshold).unwrap_or(i32::MAX);
                 combatant.gauge_recovery_remaining_ticks = 0;
-                combatant.remaining_bounces = phys.0.max_bounce_count;
+                combatant.remaining_bounces = phys.0.bounce_count;
                 combatant.final_action = if lethal {
                     FinalAction::Dead
                 } else {
                     FinalAction::LieDown
                 };
                 combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, *enemy_facing);
+                if already_airborne {
+                    combatant.juggle_count = combatant.juggle_count.saturating_add(1);
+                }
                 *enemy_state = CharacterState::KnockbackUp;
                 tracing::info!(
                     enemy = ?enemy_entity,
                     vel_x = kb.vel_x, vel_y = kb.vel_y, vel_z = kb.vel_z,
                     final_action = ?combatant.final_action,
                     hit_from_behind = combatant.hit_from_behind,
+                    juggle_count = combatant.juggle_count,
                     "attack: knockback triggered",
                 );
             } else {
                 // 通常 Hit (のけぞり): gauge_recovery_remaining_ticks を立てて、間隔を空ければ
                 // 自然回復する。hit_stop は attack 側 meta.hit_stop の指定通りに発動。
-                *enemy_state = CharacterState::Hit;
+                // **Down 中 (Slide / LieDown / Rise) の被弾は地上 hit ポーズ用に DownHit に
+                // 遷移**: 通常の Hit (立ちポーズ前提) を地面に伏せた状態で使うのは不自然。
+                // (cap 到達 down_hit はそもそも上で continue されているので、ここに来た時点で
+                // count はまだ余裕がある。)
+                if is_down {
+                    *enemy_state = CharacterState::DownHit;
+                    combatant.down_hit_count = combatant.down_hit_count.saturating_add(1);
+                } else {
+                    *enemy_state = CharacterState::Hit;
+                }
                 combatant.gauge_recovery_remaining_ticks = ms_to_ticks(phys.0.hit_recovery_ms);
                 if let Some(hs) = meta.hit_stop {
                     let fallback_ms = enemy_anims
@@ -613,6 +678,8 @@ mod tests {
             remaining_bounces: 0,
             final_action: FinalAction::default(),
             hit_from_behind: false,
+            juggle_count: 0,
+            down_hit_count: 0,
         }
     }
 
@@ -770,7 +837,19 @@ mod tests {
             half_x: 10.0,
             half_y: 10.0,
             half_z: 10.0,
+            disabled: false,
         };
         assert!(aabb_intersects(&attack, &body));
+    }
+
+    #[test]
+    fn aabb_intersects_returns_false_for_disabled_body() {
+        // ADR-0024: BodyBox-driven 無敵。`disabled=true` なら幾何が重なっていても hit しない。
+        let attack = AttackBox::from_attacker(pos(100.0, 0.0, 200.0), Facing::Right);
+        let mut body = BodyBox::default_for_world(pos(110.0, 0.0, 200.0));
+        // 通常 overlap している前提を確認
+        assert!(aabb_intersects(&attack, &body));
+        body.disabled = true;
+        assert!(!aabb_intersects(&attack, &body));
     }
 }

@@ -56,7 +56,7 @@ pub struct CharacterPhysics {
     /// Knockback の被軽減率。0..1。実効 = 攻撃側の knockback * (1 - resistance)。
     pub knockback_resistance: f32,
     /// バウンス回数の上限。`KnockbackDown` で着地したとき残バウンス > 0 ならバウンス。
-    pub max_bounce_count: u32,
+    pub bounce_count: u32,
     /// バウンス時の VelY 反転減衰率 (0..1)。0.5 で半分の高さまで跳ねる。
     pub bounce_dampening: f32,
     /// 地面スライド時の X/Z 摩擦 (px/s²)。`ActionSlide` のみ適用される。
@@ -69,6 +69,16 @@ pub struct CharacterPhysics {
     /// Rise Animation が未登録 or is_loop=true のときの固定 timer (ms)。
     /// is_loop=false の Animation を登録した場合は Animation 長が優先される。
     pub rise_duration_ms: u32,
+    /// 1 連続コンボあたりの空中再被弾 (ジャグル) 最大回数。`Combatant.juggle_count` がこれを
+    /// 超えた airborne hit は **完全無敵** (damage / state / gauge / consumed 全て不発、
+    /// AABB ヒットしても素通り) になる (= 永久パターン回避)。
+    /// Rise → Idle で counter は reset される。
+    pub max_juggle_count: u32,
+    /// 1 連続コンボあたりの DownHit (倒れ中被弾) 最大回数。`Combatant.down_hit_count` がこれを
+    /// 超えた down hit は **完全無敵** (damage / state / gauge / consumed 全て不発、AABB
+    /// ヒットしても素通り) になる (= 倒れたまま無敵、永久パターン回避)。
+    /// Rise → Idle で counter は reset される。
+    pub max_down_hit_count: u32,
 }
 
 impl Default for CharacterPhysics {
@@ -78,12 +88,14 @@ impl Default for CharacterPhysics {
             jump_velocity_y: 200.0,
             knockback_threshold: 100,
             knockback_resistance: 0.0,
-            max_bounce_count: 1,
+            bounce_count: 1,
             bounce_dampening: 0.5,
             ground_friction: 600.0,
             hit_recovery_ms: 1500,
             lie_down_duration_ms: 800,
             rise_duration_ms: 300,
+            max_juggle_count: 3,
+            max_down_hit_count: 3,
         }
     }
 }

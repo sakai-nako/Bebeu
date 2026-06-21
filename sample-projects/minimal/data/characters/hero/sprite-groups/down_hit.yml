@@ -1,0 +1,13 @@
+name: down_hit
+number: 11
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [0, 76]
+    bottom_right: [48, 90]
+    depth: 16
+  attack_boxes: null

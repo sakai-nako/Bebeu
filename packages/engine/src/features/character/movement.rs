@@ -13,6 +13,7 @@ use crate::entities::project::Project;
 use crate::shared::projection;
 
 use super::animation::{AnimationFrames, AnimationSet, VSYNC_TICK_SECS};
+use super::debug_control::SimulationSet;
 use super::state_machine::CharacterState;
 
 /// Player を 1 体だけ識別する marker component。
@@ -83,7 +84,8 @@ impl Plugin for MovementPlugin {
                 (sync_transform, sync_flip, sync_anchor, camera_follow)
                     .after(handle_input)
                     .after(AnimationSet::Tick),
-            ),
+            )
+                .in_set(SimulationSet::Active),
         );
     }
 }
@@ -113,6 +115,8 @@ fn handle_input(
         dz -= step;
     }
     let attack_pressed = keys.just_pressed(KeyCode::Space) || keys.just_pressed(KeyCode::KeyJ);
+    // 下段攻撃 (倒れた敵向けの低位置 AttackBox)。`K` キー。
+    let down_attack_pressed = keys.just_pressed(KeyCode::KeyK);
     let move_target_state = if dx == 0.0 && dz == 0.0 {
         CharacterState::Idle
     } else {
@@ -128,6 +132,10 @@ fn handle_input(
         }
         if attack_pressed {
             *state = CharacterState::Attack;
+            continue;
+        }
+        if down_attack_pressed {
+            *state = CharacterState::DownAttack;
             continue;
         }
         if dx != 0.0 || dz != 0.0 {

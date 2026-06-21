@@ -18,6 +18,9 @@ use super::movement::{Enemy, Facing, Player, WorldPosition};
 use super::state_machine::CharacterState;
 
 const BODY_COLOR: Color = Color::srgb(0.3, 1.0, 0.4);
+/// `BodyBox.disabled=true` (ADR-0024 BodyBox-driven 無敵 frame) を区別するため、
+/// 灰色っぽい色で出す。アニメ author が「無敵が立ったタイミング」を視認できる。
+const BODY_DISABLED_COLOR: Color = Color::srgb(0.5, 0.5, 0.55);
 const ATTACK_COLOR: Color = Color::srgb(1.0, 0.3, 0.3);
 const PIVOT_COLOR: Color = Color::srgb(1.0, 1.0, 0.2);
 /// pivot marker のクロス半径 (world px = 画像 px)。低解像度 (384×216) で潰れない最小値。
@@ -68,6 +71,11 @@ fn draw_hitboxes(
         return;
     }
     for body in &body_query {
+        let color = if body.disabled {
+            BODY_DISABLED_COLOR
+        } else {
+            BODY_COLOR
+        };
         draw_box_xy(
             &mut gizmos,
             body.center_x,
@@ -75,7 +83,7 @@ fn draw_hitboxes(
             body.center_z,
             body.half_x,
             body.half_y,
-            BODY_COLOR,
+            color,
         );
     }
     for (pos, facing, state, anim, depth) in &player_query {

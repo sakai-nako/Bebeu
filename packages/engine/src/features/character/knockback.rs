@@ -22,6 +22,7 @@ use bevy::prelude::*;
 use crate::entities::character::Physics;
 
 use super::animation::{AnimationFrames, AnimationSet, VSYNC_TICK_SECS};
+use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
 use super::movement::WorldPosition;
 use super::state_machine::CharacterState;
@@ -54,9 +55,9 @@ pub struct Combatant {
     /// `advance_stage_timer` が消化し、anim 終端と OR 条件で次段に進める (ADR-0025
     /// 二重終了条件)。
     pub stage_timer_ticks: u32,
-    /// 残りバウンド回数。`Physics.max_bounce_count` で初期化し、`KnockbackDown` /
+    /// 残りバウンド回数。`Physics.bounce_count` で初期化し、`KnockbackDown` /
     /// `BounceDown` 着地ごとに 1 消費する。0 で次の着地は `Slide` に倒れる。
-    /// 吹っ飛び発動時に attack 解決側が `max_bounce_count` で reset する。
+    /// 吹っ飛び発動時に attack 解決側が `bounce_count` で reset する。
     pub remaining_bounces: u32,
     /// 吹っ飛びフロー終端の挙動 (ADR-0025)。default `LieDown` で Rise → Idle、`Dead`
     /// で LieDown 永続停止。
@@ -66,10 +67,20 @@ pub struct Combatant {
     /// knockback ベクトルから判定して立てる。1 回の吹っ飛びフロー全体を通じて保持し、
     /// 次の Idle 復帰 (`Rise → Idle`) で false にリセット。
     pub hit_from_behind: bool,
+    /// 1 連続コンボあたりの「空中再被弾 → knockback 再発火」回数。`Physics.max_juggle_count`
+    /// を超えた airborne hit は **完全無敵** (damage / state / gauge / consumed 全て不発、
+    /// AABB ヒットしても素通り) になる (= 永久パターン回避)。
+    /// Rise → Idle で 0 に reset (= コンボ終了で freshness 復活)。
+    pub juggle_count: u32,
+    /// 1 連続コンボあたりの「DownHit 遷移」回数。`Physics.max_down_hit_count` を超えた down
+    /// hit は **完全無敵** (damage / state / gauge / consumed 全て不発、AABB ヒットしても
+    /// 素通り) になる (= 倒れたまま無敵)。
+    /// Rise → Idle で 0 に reset。
+    pub down_hit_count: u32,
 }
 
 impl Combatant {
-    /// gauge を `knockback_threshold`、remaining_bounces を `max_bounce_count` で初期化する。
+    /// gauge を `knockback_threshold`、remaining_bounces を `bounce_count` で初期化する。
     /// final_action / hit_from_behind は default (LieDown / false) で開始。
     #[must_use]
     pub fn new(physics: &Physics) -> Self {
@@ -77,9 +88,11 @@ impl Combatant {
             gauge: i32::try_from(physics.knockback_threshold).unwrap_or(i32::MAX),
             gauge_recovery_remaining_ticks: 0,
             stage_timer_ticks: 0,
-            remaining_bounces: physics.max_bounce_count,
+            remaining_bounces: physics.bounce_count,
             final_action: FinalAction::default(),
             hit_from_behind: false,
+            juggle_count: 0,
+            down_hit_count: 0,
         }
     }
 }
@@ -121,7 +134,8 @@ impl Plugin for KnockbackPlugin {
                 advance_stage_timer,
             )
                 .chain()
-                .after(AnimationSet::Tick),
+                .after(AnimationSet::Tick)
+                .in_set(SimulationSet::Active),
         );
     }
 }
@@ -335,14 +349,28 @@ fn advance_stage_timer(
                     }
                 }
             }
+            CharacterState::DownHit => {
+                // 地上 hit が終わったら LieDown に戻し、stage_timer を fresh に
+                // (= 倒れたまま、down 時間が延長される)。anim が is_loop=false なら finished
+                // で進む。
+                if anim.is_finished() {
+                    combatant.stage_timer_ticks = ms_to_ticks(phys.0.lie_down_duration_ms);
+                    Some(CharacterState::LieDown)
+                } else {
+                    None
+                }
+            }
             CharacterState::Rise => {
                 let expired = tick_down_or_anim_finished(&mut combatant.stage_timer_ticks, anim);
                 if expired {
                     combatant.gauge = i32::try_from(phys.0.knockback_threshold).unwrap_or(i32::MAX);
                     combatant.gauge_recovery_remaining_ticks = 0;
-                    combatant.remaining_bounces = phys.0.max_bounce_count;
+                    combatant.remaining_bounces = phys.0.bounce_count;
                     combatant.final_action = FinalAction::LieDown;
                     combatant.hit_from_behind = false;
+                    // 1 コンボ終了 → ジャグル / DownHit counter を fresh に戻す。
+                    combatant.juggle_count = 0;
+                    combatant.down_hit_count = 0;
                     Some(CharacterState::Idle)
                 } else {
                     None
@@ -392,7 +420,7 @@ mod tests {
     fn combatant_new_initializes_gauge_to_threshold() {
         let p = Physics {
             knockback_threshold: 120,
-            max_bounce_count: 2,
+            bounce_count: 2,
             ..Physics::default()
         };
         let c = Combatant::new(&p);

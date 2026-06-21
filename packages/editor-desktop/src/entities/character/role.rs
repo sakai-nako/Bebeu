@@ -62,6 +62,12 @@ pub enum Role {
     DeadBackBounceDown,
     DeadBackSlide,
     DeadBackLieDown,
+    /// Down 中 (Slide / LieDown / Rise) に被弾したときの地上 hit ポーズ。Hit が立ちポーズ
+    /// 前提なので、地面に伏せている被弾には別 role を割り当てる。single-cardinality。
+    DownHit,
+    /// 下段攻撃ポーズ (`K` キー)。AttackBox を低位置に置いて倒れた敵 (LieDown) に当てる用。
+    /// single-cardinality。
+    DownAttack,
     /// 役割なしスロット。エンジン側の State には流れず、AI scripting 等で number/name 経由で参照される。
     #[default]
     Custom,
@@ -133,6 +139,8 @@ impl Role {
             Role::DeadBackBounceDown,
             Role::DeadBackSlide,
             Role::DeadBackLieDown,
+            Role::DownHit,
+            Role::DownAttack,
             Role::Custom,
         ]
     }
@@ -173,6 +181,8 @@ impl Role {
             Role::DeadBackBounceDown => "DeadBackBounceDown",
             Role::DeadBackSlide => "DeadBackSlide",
             Role::DeadBackLieDown => "DeadBackLieDown",
+            Role::DownHit => "DownHit",
+            Role::DownAttack => "DownAttack",
             Role::Custom => "Custom",
         }
     }
@@ -204,6 +214,8 @@ impl Role {
                 | Role::BackSlide
                 | Role::BackLieDown
                 | Role::BackRise
+                | Role::DownHit
+                | Role::DownAttack
                 | Role::Custom
         )
     }
@@ -245,6 +257,8 @@ impl Role {
             Role::DeadBackBounceDown => "dead_back_bounce_down",
             Role::DeadBackSlide => "dead_back_slide",
             Role::DeadBackLieDown => "dead_back_lie_down",
+            Role::DownHit => "down_hit",
+            Role::DownAttack => "down_attack",
             Role::Custom => "custom",
         }
     }
@@ -285,6 +299,8 @@ impl Role {
             "dead_back_bounce_down" => Role::DeadBackBounceDown,
             "dead_back_slide" => Role::DeadBackSlide,
             "dead_back_lie_down" => Role::DeadBackLieDown,
+            "down_hit" => Role::DownHit,
+            "down_attack" => Role::DownAttack,
             "custom" => Role::Custom,
             _ => return None,
         })
@@ -326,7 +342,7 @@ impl Role {
             | Role::DeadBackBounceUp
             | Role::DeadBackBounceDown
             | Role::DeadBackSlide => TerminatorKind::PhysicsDriven,
-            Role::LieDown | Role::Rise | Role::BackLieDown | Role::BackRise => {
+            Role::LieDown | Role::Rise | Role::BackLieDown | Role::BackRise | Role::DownHit => {
                 TerminatorKind::AnimationLengthOrTimer
             }
             Role::DeadLieDown | Role::DeadBackLieDown => TerminatorKind::AnimationLengthPersistent,
@@ -336,6 +352,7 @@ impl Role {
             | Role::Hit
             | Role::Block
             | Role::Jump
+            | Role::DownAttack
             | Role::Custom => TerminatorKind::Generic,
         }
     }

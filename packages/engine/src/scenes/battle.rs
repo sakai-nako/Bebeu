@@ -18,7 +18,7 @@ use crate::entities::project::Project;
 use crate::features::character::{
     AnimationData, AnimationFrames, AttackHitConsumed, BodyBox, CharacterDepth, CharacterState,
     Combatant, Enemy, EnemyAnimationSet, Facing, FrameRender, HitPoints, KinematicVel, MainCamera,
-    PhysicsParams, Player, PlayerAnimationLibrary, VSYNC_TICK, WorldPosition,
+    PhysicsParams, Player, PlayerAnimationLibrary, SimulationSet, VSYNC_TICK, WorldPosition,
 };
 use crate::shared::config::RuntimePaths;
 use crate::shared::flip::flip_x_of;
@@ -38,7 +38,9 @@ impl Plugin for BattleScenePlugin {
             .add_systems(
                 Update,
                 // Level Resource は battle setup で初めて挿入されるので、title 中に走ると panic する。
-                spawn_opponents_on_trigger.run_if(resource_exists::<Level>),
+                spawn_opponents_on_trigger
+                    .run_if(resource_exists::<Level>)
+                    .in_set(SimulationSet::Active),
             );
     }
 }
@@ -227,6 +229,8 @@ fn setup(
         Combatant::new(&character.physics),
         KinematicVel::default(),
         PhysicsParams(character.physics.clone()),
+        // Player も Enemy と同様に HP を持たせる (debug overlay の HP 表示 / 将来の被弾対応)。
+        HitPoints::new(character.hp),
     ));
 
     commands.insert_resource(library);
@@ -293,6 +297,7 @@ fn build_animation_frames(
             attack_meta: extract_attack_meta(frame, sprite),
             attack_box_geom: extract_attack_box_geom(frame, sprite),
             body_box_geoms: extract_body_box_geoms(frame, sprite),
+            body_box_disabled: extract_body_box_disabled(frame),
             sprite_pivot: [pivot_x, pivot_y],
         });
     }
@@ -371,6 +376,18 @@ fn resolve_body_boxes<'a>(frame: &'a Frame, sprite: &'a SpriteEntry) -> &'a [Hit
 #[must_use]
 fn extract_body_box_geoms(frame: &Frame, sprite: &SpriteEntry) -> Vec<HitBox> {
     resolve_body_boxes(frame, sprite).to_vec()
+}
+
+/// ADR-0024: frame が **明示的に** BodyBox を Disable しているか
+/// (= `body_box_overrides: []`)。`true` のとき `BodyBox.disabled` が立ち、`aabb_intersects`
+/// が無条件で false (= 無敵 frame) を返す。
+///
+/// `null` override (Inherit) や Some(non-empty) (Override) では false。
+/// sprite に body_boxes が無くて override も `null` で結果が empty になるケース (= 安全網
+/// fallback) も false (= 通常 hittable, default_for_world で持つ)。
+#[must_use]
+fn extract_body_box_disabled(frame: &Frame) -> bool {
+    matches!(frame.body_box_overrides.as_deref(), Some([]))
 }
 
 /// Player の world X が `trigger_x` 以上になった最初の trigger を返す。
@@ -778,5 +795,26 @@ mod tests {
         let frame = Frame::default();
         let sprite = sprite_with_body(None);
         assert!(extract_body_box_geoms(&frame, &sprite).is_empty());
+    }
+
+    #[test]
+    fn extract_body_box_disabled_only_for_explicit_empty_override() {
+        // Override Some([]) = ADR-0024 Disable (= 無敵 frame)。
+        let f_empty = Frame {
+            body_box_overrides: Some(vec![]),
+            ..Frame::default()
+        };
+        assert!(extract_body_box_disabled(&f_empty));
+
+        // null override = Inherit (= sprite に従う)。Disable ではない。
+        let f_inherit = Frame::default();
+        assert!(!extract_body_box_disabled(&f_inherit));
+
+        // Some(non-empty) = 通常の Override。Disable ではない。
+        let f_override = Frame {
+            body_box_overrides: Some(vec![body_hb()]),
+            ..Frame::default()
+        };
+        assert!(!extract_body_box_disabled(&f_override));
     }
 }

@@ -17,6 +17,7 @@ use bevy::sprite::Anchor;
 
 use crate::entities::character::{AttackBoxMeta, HitBox, HitStop};
 
+use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
 
 /// 60Hz vsync の 1 tick の長さ (= 1/60 秒 ≈ 16.667ms)。Animation の `tick` system は
@@ -30,6 +31,17 @@ use super::hit_stop::HitStopState;
 pub const VSYNC_TICK: Duration = Duration::from_micros(16_667);
 /// `VSYNC_TICK` の秒換算 (= 1/60)。movement 等の f32 計算で使う。
 pub const VSYNC_TICK_SECS: f32 = 1.0 / 60.0;
+
+/// `Duration` を 60Hz tick 数に変換する (floor)。debug overlay や
+/// `AnimationFrames::current_frame_elapsed_ticks` 等で使う。
+#[must_use]
+pub fn duration_to_ticks(d: Duration) -> u32 {
+    let tick_us = VSYNC_TICK.as_micros();
+    if tick_us == 0 {
+        return 0;
+    }
+    u32::try_from(d.as_micros() / tick_us).unwrap_or(u32::MAX)
+}
 
 /// 1 frame ぶんの描画パラメータ。
 #[derive(Debug, Clone)]
@@ -56,6 +68,11 @@ pub struct FrameRender {
     /// Frame.body_box_overrides の 3-state (Inherit/Disable/Override) と SpriteEntry.body_boxes
     /// を解釈した結果を build 時に焼き込む。
     pub body_box_geoms: Vec<HitBox>,
+    /// ADR-0024: この frame で BodyBox が **明示的に Disable** されているか
+    /// (= `body_box_overrides: []`)。`true` のときは当たり判定を行わない (= 無敵 frame)。
+    /// `body_box_geoms` が空 + `disabled=false` は「default fallback で位置だけ追従」する
+    /// 通常 hittable な BodyBox を表す (= 安全網)。
+    pub body_box_disabled: bool,
     /// 現フレームの最終 pivot 位置 (画像 pixel)。`SpriteEntry.pivot_point` に
     /// `frame.pivot_point_offset` と `layer.pivot_point_offset` を加算したもの。
     /// AttackBox / BodyBox の世界変換で「画像座標 → world 座標」の原点として使う。
@@ -73,6 +90,10 @@ pub struct AnimationFrames {
     /// `Timer` を毎 frame `Timer::new()` で作り直すと超過分が捨てられ、120ms 等
     /// vsync (≒16.67ms) の整数倍でない duration で jitter が出るため、accumulator 方式にする。
     elapsed_in_frame: Duration,
+    /// AnimationFrames が `new` されてからの総経過時間。`advance` で増える。`Changed<
+    /// CharacterState>` で sync_animation が新しい `AnimationFrames` に差し替えると 0 に
+    /// reset される (= 現 state / animation での経過時間として読める)。debug overlay 用。
+    total_elapsed: Duration,
 }
 
 impl AnimationFrames {
@@ -85,6 +106,7 @@ impl AnimationFrames {
             loop_start_index,
             current: 0,
             elapsed_in_frame: Duration::ZERO,
+            total_elapsed: Duration::ZERO,
         }
     }
 
@@ -128,6 +150,35 @@ impl AnimationFrames {
         self.current
     }
 
+    /// AnimationFrames が保持する frame 総数 (= animation の長さ)。debug overlay 用。
+    #[must_use]
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// 現 frame 内で経過した tick 数。`tick_secs` で除算して整数 tick を返す
+    /// (= 1 vsync = 1 tick の前提)。debug overlay 用。
+    #[must_use]
+    pub fn current_frame_elapsed_ticks(&self) -> u32 {
+        duration_to_ticks(self.elapsed_in_frame)
+    }
+
+    /// 現 frame の合計 tick 数 (= `Frame.ticks`)。空 frames では 0。debug overlay 用。
+    #[must_use]
+    pub fn current_frame_total_ticks(&self) -> u32 {
+        self.frames
+            .get(self.current)
+            .map_or(0, |f| duration_to_ticks(f.duration))
+    }
+
+    /// `new` されてからの総経過 tick 数。`sync_animation` が新しい `AnimationFrames` に
+    /// 差し替えると 0 から再開するので、現 animation (= 現 CharacterState) での
+    /// 経過 tick として読める。debug overlay 用。
+    #[must_use]
+    pub fn total_elapsed_ticks(&self) -> u32 {
+        duration_to_ticks(self.total_elapsed)
+    }
+
     /// 現在 frame の AttackBoxMeta (`None` なら攻撃判定なし)。
     /// attack 系 system はこの値で「今この frame で AttackBox を生やすか」を判定し、
     /// hit 解決時の damage / knockback / hit_stop もここから引く。
@@ -158,6 +209,15 @@ impl AnimationFrames {
         self.frames
             .get(self.current)
             .map_or(&[][..], |f| &f.body_box_geoms[..])
+    }
+
+    /// 現在 frame で BodyBox が明示的に Disable されているか (ADR-0024)。`true` のとき
+    /// `sync_body_box` が `BodyBox.disabled=true` にセットして hit 判定から弾く。
+    #[must_use]
+    pub fn current_body_box_disabled(&self) -> bool {
+        self.frames
+            .get(self.current)
+            .is_some_and(|f| f.body_box_disabled)
     }
 
     /// 現在 frame の最終 pivot (画像 pixel)。frames が空のときは `[0, 0]`。
@@ -216,6 +276,7 @@ impl AnimationFrames {
             return false;
         }
         self.elapsed_in_frame += delta;
+        self.total_elapsed += delta;
         let mut advanced = false;
         loop {
             let cur_dur = self.frames[self.current].duration;
@@ -257,7 +318,10 @@ pub struct AnimationPlugin;
 
 impl Plugin for AnimationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (tick.in_set(AnimationSet::Tick), sync_transparency));
+        app.add_systems(
+            Update,
+            (tick.in_set(AnimationSet::Tick), sync_transparency).in_set(SimulationSet::Active),
+        );
     }
 }
 
@@ -319,6 +383,7 @@ mod tests {
             attack_meta: None,
             attack_box_geom: None,
             body_box_geoms: Vec::new(),
+            body_box_disabled: false,
             sprite_pivot: [0, 0],
         }
     }
@@ -464,6 +529,60 @@ mod tests {
         assert!(frames.advance(Duration::from_millis(130)));
         assert_eq!(frames.current, 1);
         assert_eq!(frames.elapsed_in_frame, Duration::from_millis(30));
+    }
+
+    #[test]
+    fn total_elapsed_accumulates_across_frame_transitions() {
+        // 100ms × 3 frames、delta 1 回ぶん (130ms) で frame 1 に進んでも total は 130ms 維持。
+        let mut frames = AnimationFrames::new(vec![dummy_frame(100); 3], true, 0);
+        frames.advance(Duration::from_millis(130));
+        assert_eq!(frames.total_elapsed, Duration::from_millis(130));
+        frames.advance(Duration::from_millis(50));
+        assert_eq!(frames.total_elapsed, Duration::from_millis(180));
+    }
+
+    #[test]
+    fn current_frame_elapsed_ticks_floors_to_full_ticks() {
+        // VSYNC_TICK = 16.667ms。25ms 消化 → floor(25 / 16.667) = 1 tick。
+        let mut frames = AnimationFrames::new(vec![dummy_frame(200)], false, 0);
+        frames.advance(Duration::from_millis(25));
+        assert_eq!(frames.current_frame_elapsed_ticks(), 1);
+    }
+
+    #[test]
+    fn current_frame_total_ticks_uses_frame_duration() {
+        // dummy_frame(120ms) → ticks = 120 / 16.667 ≒ 7.2 → floor = 7。
+        let frames = AnimationFrames::new(vec![dummy_frame(120)], false, 0);
+        assert_eq!(frames.current_frame_total_ticks(), 7);
+        assert_eq!(frames.current_frame_elapsed_ticks(), 0);
+    }
+
+    #[test]
+    fn total_elapsed_ticks_reflects_anim_lifetime() {
+        let mut frames = AnimationFrames::new(vec![dummy_frame(100); 2], true, 0);
+        frames.advance(Duration::from_millis(50));
+        assert_eq!(frames.total_elapsed_ticks(), 2); // 50 / 16.667 ≒ 3 だが floor で 2 (= 50/16.67 = 2.999)
+        // 厳密: 50_000 / 16_667 = 2 余り 16_666 → 2
+        frames.advance(Duration::from_millis(100));
+        assert_eq!(frames.total_elapsed_ticks(), 8); // 150_000 / 16_667 = 9 余り 3 → 8.997 → floor 8
+        // 厳密: 150_000 / 16_667 = 8 余り 16_664 → 8
+    }
+
+    #[test]
+    fn frame_count_returns_total_frames() {
+        let frames = AnimationFrames::new(vec![dummy_frame(100); 5], false, 0);
+        assert_eq!(frames.frame_count(), 5);
+        let empty = AnimationFrames::new(vec![], false, 0);
+        assert_eq!(empty.frame_count(), 0);
+    }
+
+    #[test]
+    fn duration_to_ticks_floors() {
+        // 1 tick = 16667us
+        assert_eq!(duration_to_ticks(Duration::ZERO), 0);
+        assert_eq!(duration_to_ticks(Duration::from_micros(16_666)), 0);
+        assert_eq!(duration_to_ticks(Duration::from_micros(16_667)), 1);
+        assert_eq!(duration_to_ticks(Duration::from_micros(33_334)), 2);
     }
 
     #[test]

@@ -81,30 +81,36 @@ impl PhysicsF32Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicsU32Field {
     KnockbackThreshold,
-    MaxBounceCount,
+    BounceCount,
     HitRecoveryMs,
     LieDownDurationMs,
     RiseDurationMs,
+    MaxJuggleCount,
+    MaxDownHitCount,
 }
 
 impl PhysicsU32Field {
     fn get(self, p: &CharacterPhysics) -> u32 {
         match self {
             Self::KnockbackThreshold => p.knockback_threshold,
-            Self::MaxBounceCount => p.max_bounce_count,
+            Self::BounceCount => p.bounce_count,
             Self::HitRecoveryMs => p.hit_recovery_ms,
             Self::LieDownDurationMs => p.lie_down_duration_ms,
             Self::RiseDurationMs => p.rise_duration_ms,
+            Self::MaxJuggleCount => p.max_juggle_count,
+            Self::MaxDownHitCount => p.max_down_hit_count,
         }
     }
 
     fn set(self, p: &mut CharacterPhysics, v: u32) {
         match self {
             Self::KnockbackThreshold => p.knockback_threshold = v,
-            Self::MaxBounceCount => p.max_bounce_count = v,
+            Self::BounceCount => p.bounce_count = v,
             Self::HitRecoveryMs => p.hit_recovery_ms = v,
             Self::LieDownDurationMs => p.lie_down_duration_ms = v,
             Self::RiseDurationMs => p.rise_duration_ms = v,
+            Self::MaxJuggleCount => p.max_juggle_count = v,
+            Self::MaxDownHitCount => p.max_down_hit_count = v,
         }
     }
 
@@ -112,10 +118,12 @@ impl PhysicsU32Field {
     pub fn label(self) -> &'static str {
         match self {
             Self::KnockbackThreshold => "Knockback Gauge",
-            Self::MaxBounceCount => "Max Bounces",
+            Self::BounceCount => "Bounce Count",
             Self::HitRecoveryMs => "Hit Recovery (ms)",
             Self::LieDownDurationMs => "LieDown (ms)",
             Self::RiseDurationMs => "Rise (ms)",
+            Self::MaxJuggleCount => "Max Juggle Count",
+            Self::MaxDownHitCount => "Max DownHit Count",
         }
     }
 
@@ -125,8 +133,8 @@ impl PhysicsU32Field {
             Self::KnockbackThreshold => {
                 "Knockback ゲージの最大値。Hit を受けるたび knockback_damage で減算され、0 以下で吹っ飛び発動 → full 回復"
             }
-            Self::MaxBounceCount => {
-                "バウンス回数の上限。0 でバウンス無効 (Slide に直行)。1 で 1 回バウンス"
+            Self::BounceCount => {
+                "吹っ飛び発動 1 回あたりのバウンス回数 (必ずこの回数だけ跳ねてから Slide)。0 でバウンス無効、1 で 1 回跳ねる。bounce_dampening=0 でも回数は消化される"
             }
             Self::HitRecoveryMs => {
                 "Hit (地上小硬直) 後、Knockback ゲージが full 回復するまでの待ち (ms)"
@@ -136,6 +144,12 @@ impl PhysicsU32Field {
             }
             Self::RiseDurationMs => {
                 "対応 Role: Rise (Animation が is_loop=true または未登録時のみ使用)。is_loop=false の単発 Animation を登録した場合は Animation 長が優先される"
+            }
+            Self::MaxJuggleCount => {
+                "1 連続コンボあたりの空中再被弾 (ジャグル) 最大回数。これを超えた airborne hit は完全無敵 (damage も入らず素通り) になる (= 永久パターン回避)。Rise → Idle で reset"
+            }
+            Self::MaxDownHitCount => {
+                "1 連続コンボあたりの DownHit (倒れ中被弾) 最大回数。これを超えた down hit は完全無敵 (damage も入らず素通り) になる (= 倒れたまま無敵)。Rise → Idle で reset"
             }
         }
     }
@@ -371,10 +385,12 @@ mod tests {
         let mut p = CharacterPhysics::default();
         for f in [
             PhysicsU32Field::KnockbackThreshold,
-            PhysicsU32Field::MaxBounceCount,
+            PhysicsU32Field::BounceCount,
             PhysicsU32Field::HitRecoveryMs,
             PhysicsU32Field::LieDownDurationMs,
             PhysicsU32Field::RiseDurationMs,
+            PhysicsU32Field::MaxJuggleCount,
+            PhysicsU32Field::MaxDownHitCount,
         ] {
             f.set(&mut p, 999);
             assert_eq!(f.get(&p), 999);

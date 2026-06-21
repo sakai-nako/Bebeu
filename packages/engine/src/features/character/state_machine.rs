@@ -20,6 +20,7 @@ use bevy::sprite::Anchor;
 use crate::entities::character::Role;
 
 use super::animation::{AnimationFrames, FrameRender};
+use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
 use super::knockback::{Combatant, FinalAction};
 use super::movement::{Enemy, Facing, Player, flip_anchor, total_flip_x};
@@ -52,6 +53,15 @@ pub enum CharacterState {
     LieDown,
     /// 起き上がりポーズ。終わったら [`Self::Idle`] に戻る。
     Rise,
+    /// **Down 中 (Slide / LieDown / Rise) に hit を受けた**ときに遷移する地上 hit。
+    /// 通常 [`Self::Hit`] は立ちポーズなので、地面に伏せている状態の hit には不適切。
+    /// Animation 終端で [`Self::LieDown`] に戻り、`stage_timer` を fresh にリセット (=
+    /// 倒れたまま、down 時間が延長される)。`advance_stage_timer` が遷移を担当。
+    DownHit,
+    /// 下段攻撃 (足元の AttackBox)。倒れた敵 (LieDown body box は世界 Y 0-14) に当てる
+    /// ための攻撃モード。`is_attack_hit_active` / `resolve_hits` は `Attack` と同等扱い。
+    /// `end_oneshot_actions` が再生終端で Idle に戻す。
+    DownAttack,
 }
 
 impl CharacterState {
@@ -71,6 +81,8 @@ impl CharacterState {
             Self::Slide => Role::Slide,
             Self::LieDown => Role::LieDown,
             Self::Rise => Role::Rise,
+            Self::DownHit => Role::DownHit,
+            Self::DownAttack => Role::DownAttack,
         }
     }
 
@@ -91,6 +103,8 @@ impl CharacterState {
                 | Self::Slide
                 | Self::LieDown
                 | Self::Rise
+                | Self::DownHit
+                | Self::DownAttack
         )
     }
 }
@@ -126,7 +140,8 @@ impl Plugin for StateMachinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerAnimationLibrary>().add_systems(
             Update,
-            (end_oneshot_actions, sync_animation, sync_enemy_animation),
+            (end_oneshot_actions, sync_animation, sync_enemy_animation)
+                .in_set(SimulationSet::Active),
         );
     }
 }
@@ -144,7 +159,11 @@ fn end_oneshot_actions(
     mut query: Query<(&AnimationFrames, &mut CharacterState), Without<HitStopState>>,
 ) {
     for (anim, mut state) in &mut query {
-        if matches!(*state, CharacterState::Attack | CharacterState::Hit) && anim.is_finished() {
+        if matches!(
+            *state,
+            CharacterState::Attack | CharacterState::Hit | CharacterState::DownAttack
+        ) && anim.is_finished()
+        {
             *state = CharacterState::Idle;
         }
     }
@@ -217,6 +236,7 @@ fn is_knockback_role(role: Role) -> bool {
             | Role::Slide
             | Role::LieDown
             | Role::Rise
+            | Role::DownHit
     )
 }
 
@@ -400,6 +420,7 @@ mod tests {
         assert_eq!(CharacterState::Slide.to_role(), Role::Slide);
         assert_eq!(CharacterState::LieDown.to_role(), Role::LieDown);
         assert_eq!(CharacterState::Rise.to_role(), Role::Rise);
+        assert_eq!(CharacterState::DownHit.to_role(), Role::DownHit);
     }
 
     #[test]
@@ -416,6 +437,7 @@ mod tests {
         assert!(CharacterState::Slide.is_locked());
         assert!(CharacterState::LieDown.is_locked());
         assert!(CharacterState::Rise.is_locked());
+        assert!(CharacterState::DownHit.is_locked());
     }
 
     /// id 別に AnimationData を作る。`loop_start_index` を識別子として使い、
@@ -526,6 +548,7 @@ mod tests {
             CharacterState::Slide,
             CharacterState::LieDown,
             CharacterState::Rise,
+            CharacterState::DownHit,
         ] {
             assert!(
                 resolve_animation_role(state, false, FinalAction::LieDown, get).is_some(),

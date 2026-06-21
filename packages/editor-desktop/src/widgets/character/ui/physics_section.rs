@@ -7,10 +7,10 @@ use crate::features::character::{
 
 /// Character の Properties エリアに並べる Physics 編集セクション。
 ///
-/// 10 個のフィールド (重力 / ジャンプ初速 / Knockback ゲージ / バウンス / 摩擦 / timer) を
-/// 単一の collapsible にまとめ、`EditPhysicsF32Inline` / `EditPhysicsU32Inline` を流し込む。
-/// 各フィールドの label / tooltip は enum 側で定義されているので、本コンポーネントは
-/// レイアウトと並び順のみ担当する。
+/// 12 個のフィールド (重力 / ジャンプ初速 / Knockback ゲージ / バウンス / 摩擦 / timer /
+/// コンボ上限) を単一の collapsible にまとめ、`EditPhysicsF32Inline` /
+/// `EditPhysicsU32Inline` を流し込む。各フィールドの label / tooltip は enum 側で
+/// 定義されているので、本コンポーネントはレイアウトと並び順のみ担当する。
 #[component]
 pub fn PhysicsSection(character: Character) -> Element {
     let f32_fields = [
@@ -22,10 +22,12 @@ pub fn PhysicsSection(character: Character) -> Element {
     ];
     let u32_fields = [
         PhysicsU32Field::KnockbackThreshold,
-        PhysicsU32Field::MaxBounceCount,
+        PhysicsU32Field::BounceCount,
         PhysicsU32Field::HitRecoveryMs,
         PhysicsU32Field::LieDownDurationMs,
         PhysicsU32Field::RiseDurationMs,
+        PhysicsU32Field::MaxJuggleCount,
+        PhysicsU32Field::MaxDownHitCount,
     ];
 
     rsx! {
@@ -36,7 +38,7 @@ pub fn PhysicsSection(character: Character) -> Element {
             div { class: "collapse collapse-arrow bg-base-200",
                 input { r#type: "checkbox" }
                 div { class: "collapse-title text-sm text-base-content/70",
-                    "重力 / ジャンプ / Knockback / バウンス / 摩擦 / timer"
+                    "重力 / ジャンプ / Knockback / バウンス / 摩擦 / timer / コンボ上限"
                 }
                 div { class: "collapse-content",
                     dl { class: "grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 items-center",

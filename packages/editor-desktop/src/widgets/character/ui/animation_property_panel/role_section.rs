@@ -211,13 +211,29 @@ fn build_terminator_text(
         Role::DeadLieDown | Role::DeadBackLieDown => {
             "終了条件: Animation 末尾で永続停止 (Rise には進まない)".to_string()
         }
-        // Generic (Idle/Walk/Attack/Hit/Block/Jump/Custom)。呼び出し側で表示を抑止する。
+        Role::DownHit => {
+            if is_loop {
+                format!(
+                    "終了条件: lie_down_duration_ms (現在: {}ms) で LieDown へ戻る",
+                    physics.lie_down_duration_ms
+                )
+            } else if anim_duration_ms > 0 {
+                format!("終了条件: Animation 終端 ({anim_duration_ms}ms) で LieDown へ戻る")
+            } else {
+                format!(
+                    "終了条件: Animation 未登録なので lie_down_duration_ms (現在: {}ms) で LieDown へ戻る",
+                    physics.lie_down_duration_ms
+                )
+            }
+        }
+        // Generic (Idle/Walk/Attack/Hit/Block/Jump/DownAttack/Custom)。呼び出し側で表示を抑止する。
         Role::Idle
         | Role::Walk
         | Role::Attack
         | Role::Hit
         | Role::Block
         | Role::Jump
+        | Role::DownAttack
         | Role::Custom => "終了条件: 呼び出し側で決定".to_string(),
     }
 }
