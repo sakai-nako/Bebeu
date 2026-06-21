@@ -4,11 +4,11 @@
 //! player は Character::load_directory で sprite-groups と animations を populate し、
 //! role=Walk の Animation を選んで `AnimationFrames` を構築する (Phase 3: layer は
 //! 各 frame の先頭 1 つだけを使う)。
-use bevy::camera::ScalingMode;
+use bevy::camera::{RenderTarget, ScalingMode};
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
-use crate::app::SceneState;
+use crate::app::{PixelPerfectTarget, SceneState};
 use crate::entities::character::{
     Animation, AttackBox, AttackBoxOverride, Character, Frame, HitBox, Role, SpriteEntry,
     SpriteGroup,
@@ -49,12 +49,20 @@ fn setup(
     asset_server: Res<AssetServer>,
     runtime: Res<RuntimePaths>,
     project: Option<Res<Project>>,
+    pixel_perfect: Option<Res<PixelPerfectTarget>>,
 ) {
     tracing::info!("battle: enter");
 
+    // Camera 描画先: pixel_perfect の中間 texture (ADR-0026)。Resource 不在 (smoke
+    // test 等) のときは default (= primary window) へ直接描画する。
+    // `RenderTarget` は Camera の require component なので tuple に並べて spawn する。
+    let camera_target = pixel_perfect.as_ref().map_or(RenderTarget::default(), |t| {
+        RenderTarget::Image(t.image.clone().into())
+    });
+
     let Some(project) = project else {
         tracing::warn!("battle: no Project resource — running with engine defaults");
-        commands.spawn(Camera2d);
+        commands.spawn((Camera2d, camera_target));
         return;
     };
 
@@ -89,6 +97,7 @@ fn setup(
     commands.spawn((
         Camera2d,
         MainCamera,
+        camera_target,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::Fixed {
                 width: project.resolution.width as f32,

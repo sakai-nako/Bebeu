@@ -6,17 +6,19 @@ use std::env;
 
 use anyhow::Result;
 use bevy::asset::AssetPlugin;
+use bevy::image::ImagePlugin;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
 
+use super::pixel_perfect::{PixelPerfectConfig, PixelPerfectRenderPlugin};
 use crate::entities::project::Project;
 use crate::features::character::{
     AnimationPlugin, AttackPlugin, HitStopPlugin, HitboxDebugPlugin, MovementPlugin,
     StateMachinePlugin,
 };
 use crate::scenes::{battle, result, title};
-use crate::shared::config::RuntimePaths;
+use crate::shared::config::{EngineConfig, RuntimePaths, WindowConfig};
 
 /// 既定のログフィルタ。`RUST_LOG` が設定されていればそちらが優先される (Bevy `LogPlugin` 仕様)。
 ///
@@ -24,12 +26,10 @@ use crate::shared::config::RuntimePaths;
 /// - その他は info 既定
 const DEFAULT_LOG_FILTER: &str = "wgpu=error,wgpu_core=error,wgpu_hal=error,naga=warn,info";
 
-/// Project resolution に対する window 整数倍率。
-/// nearest filter の pixel art を **整数倍 upscale** で表示するための制約。
+/// `bebeu-engine.yml` で `window:` が未指定のとき viewport にかける整数倍率。
 /// 3 のとき 384×216 → 1152×648 (フル HD に余裕で乗る大きさ)。
-/// 非整数だと source pixel が screen 上で 3 px / 4 px と不揃いになる
-/// (rippling) ので、window サイズはこの倍率で固定する。
-const WINDOW_INTEGER_SCALE: u32 = 3;
+/// yml で明示指定された場合はそちらが優先される。
+const WINDOW_INTEGER_SCALE_FALLBACK: u32 = 3;
 /// Project 未指定時に使う viewport 解像度の fallback (= main project の resolution)。
 const FALLBACK_VIEWPORT: (u32, u32) = (384, 216);
 
@@ -46,12 +46,6 @@ pub enum SceneState {
     Title,
     Battle,
     Result,
-}
-
-/// 起動時オプションを Resource として持ち回す。
-#[derive(Resource, Debug, Clone, Default)]
-pub struct EngineConfig {
-    pub project_name: Option<String>,
 }
 
 /// CLI 引数と環境変数を解釈して [`run`] を呼ぶ。bin からはこれだけを呼べばよい。
@@ -86,6 +80,7 @@ pub fn register_engine_plugins(app: &mut App) -> &mut App {
         .add_plugins(AttackPlugin)
         .add_plugins(HitStopPlugin)
         .add_plugins(HitboxDebugPlugin)
+        .add_plugins(PixelPerfectRenderPlugin)
         .add_plugins(title::TitleScenePlugin)
         .add_plugins(battle::BattleScenePlugin)
         .add_plugins(result::ResultScenePlugin)
@@ -94,7 +89,8 @@ pub fn register_engine_plugins(app: &mut App) -> &mut App {
 pub fn run(opts: RunOptions) -> Result<()> {
     tracing::info!(?opts, "engine: starting");
 
-    let runtime = RuntimePaths::resolve();
+    let engine_config = EngineConfig::load();
+    let runtime = RuntimePaths::resolve(&engine_config);
     tracing::info!(runtime_root = %runtime.root().display(), "engine: runtime resolved");
 
     let asset_root = runtime.data_dir().to_string_lossy().into_owned();
@@ -126,13 +122,23 @@ pub fn run(opts: RunOptions) -> Result<()> {
     let (vp_w, vp_h) = project.as_ref().map_or(FALLBACK_VIEWPORT, |p| {
         (p.resolution.width, p.resolution.height)
     });
-    let win_w = vp_w * WINDOW_INTEGER_SCALE;
-    let win_h = vp_h * WINDOW_INTEGER_SCALE;
+    let (win_w, win_h) = engine_config.window.map_or_else(
+        || {
+            (
+                vp_w * WINDOW_INTEGER_SCALE_FALLBACK,
+                vp_h * WINDOW_INTEGER_SCALE_FALLBACK,
+            )
+        },
+        |WindowConfig { width, height }| (width, height),
+    );
+    let pixel_perfect_config =
+        PixelPerfectConfig::from_viewport_and_window((vp_w, vp_h), (win_w, win_h));
     tracing::info!(
-        viewport = ?(vp_w, vp_h),
-        window = ?(win_w, win_h),
-        scale = WINDOW_INTEGER_SCALE,
-        "engine: pixel-perfect window sized to integer scale of viewport",
+        viewport = ?pixel_perfect_config.viewport,
+        intermediate = ?pixel_perfect_config.intermediate,
+        window = ?pixel_perfect_config.window,
+        "engine: pixel-perfect 3-tier sizes resolved (window=yml or viewport×{} fallback)",
+        WINDOW_INTEGER_SCALE_FALLBACK,
     );
 
     let mut app = App::new();
@@ -142,7 +148,7 @@ pub fn run(opts: RunOptions) -> Result<()> {
                 primary_window: Some(Window {
                     title: "beatemup".into(),
                     // 物理 pixel で固定 + scale_factor_override(1.0) で OS DPI スケーリングを
-                    // 無視し、source pixel : screen pixel = 1 : WINDOW_INTEGER_SCALE を保証する。
+                    // 無視し、yml と実際の window サイズを 1:1 に保証する。
                     resolution: WindowResolution::new(win_w, win_h).with_scale_factor_override(1.0),
                     ..default()
                 }),
@@ -156,11 +162,12 @@ pub fn run(opts: RunOptions) -> Result<()> {
             .set(AssetPlugin {
                 file_path: asset_root,
                 ..default()
-            }),
+            })
+            // sprite テクスチャ (キャラ / 背景) はすべて nearest sampling で扱う。
+            // 中間 render texture だけ pixel_perfect.rs で linear に上書きする (ADR-0026)。
+            .set(ImagePlugin::default_nearest()),
     )
-    .insert_resource(EngineConfig {
-        project_name: opts.project_name.clone(),
-    });
+    .insert_resource(pixel_perfect_config);
     register_engine_plugins(&mut app);
 
     if let Some(project) = project {

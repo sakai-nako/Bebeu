@@ -38,8 +38,9 @@ ADR は前身リポジトリ `local-game-workspace` (Go + ebitengine engine, Rus
 | 0023 | [base 画像ピクセル = world (X, Z) = screen 座標の一本化](0023-image-pixel-world-screen-unification.md) | Accepted (Supersedes ADR-0017) |
 | 0024 | [被弾を Knockback ゲージ + AttackBoxMeta 駆動の吹っ飛びシステムにする](0024-knockback-gauge-attackboxmeta-driven-hit.md) | Accepted |
 | 0025 | [吹っ飛びフローを単一 Action 列で表し、方向・致命傷を Animation 解決層で分離する](0025-knockback-flow-single-action-animation-resolution.md) | Accepted |
+| 0026 | [pixel-perfect 拡大を中間 render texture で分離する (window は yml 駆動)](0026-pixel-perfect-via-intermediate-render-target.md) | Accepted |
 
 ## 書き方
 
-新しい ADR は次の番号 (`0026-` から) を使い、テンプレートは ADR-0001 を参考にしてください。
+新しい ADR は次の番号 (`0027-` から) を使い、テンプレートは ADR-0001 を参考にしてください。
 Status は Accepted / Superseded by ADR-XXXX / Refined by ADR-XXXX / Deprecated のいずれか。

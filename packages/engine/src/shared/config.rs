@@ -1,10 +1,20 @@
-//! Engine の runtime ディレクトリ解決 (旧 `internal/engine/shared/config`)。
+//! Engine の runtime ディレクトリ解決と起動時 config (`bebeu-engine.yml`)。
 //!
-//! 開発時は `CARGO_MANIFEST_DIR/../../runtime` を絶対パスとして解決する。
-//! `BEATEMUP_RUNTIME_DIR` が設定されていればそちらを優先 (配布バイナリや CI で上書きする用途)。
+//! `bebeu-engine.yml` は **engine が起動時に 1 度だけ読む config**。`workspace_dir`
+//! と `window` を持つ (ADR-0016 が言う「engine 専用 config」)。
+//!
+//! 解決優先順:
+//! - `workspace_dir`: env `BEATEMUP_RUNTIME_DIR` > yml `workspace_dir` >
+//!   `CARGO_MANIFEST_DIR/../../runtime`
+//! - yml ファイル位置: env `BEATEMUP_ENGINE_CONFIG` > `CARGO_MANIFEST_DIR/bebeu-engine.yml`
+//!
+//! yml が無い / 壊れている場合は default で fail-soft する (config なしでも engine は
+//! 起動できる)。Project YAML のような一次データは fail-soft しない (ADR-0011 / testing.md)
+//! が、起動 config は補助なので扱いを分ける。
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::Resource;
+use serde::Deserialize;
 
 /// runtime ツリー (`runtime/data`, `runtime/assets`) のルート位置。
 #[derive(Resource, Debug, Clone)]
@@ -13,10 +23,15 @@ pub struct RuntimePaths {
 }
 
 impl RuntimePaths {
-    pub fn resolve() -> Self {
+    pub fn resolve(engine_config: &EngineConfig) -> Self {
         if let Some(env_root) = std::env::var_os("BEATEMUP_RUNTIME_DIR") {
             return Self {
                 root: PathBuf::from(env_root),
+            };
+        }
+        if let Some(yml_root) = engine_config.workspace_dir.as_ref() {
+            return Self {
+                root: yml_root.clone(),
             };
         }
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -95,6 +110,57 @@ impl RuntimePaths {
     /// 既知の root から組み立てる。主にテストで `tempfile::tempdir()` の path を渡す用途。
     pub fn from_root(root: PathBuf) -> Self {
         Self { root }
+    }
+}
+
+/// `bebeu-engine.yml` で指定できる window pixel サイズ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct WindowConfig {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// `bebeu-engine.yml` の内容。
+///
+/// 未指定フィールドは `None` のまま (entrypoint 側で fallback を当てる)。
+#[derive(Resource, Debug, Clone, Default, Deserialize)]
+pub struct EngineConfig {
+    #[serde(default)]
+    pub workspace_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub window: Option<WindowConfig>,
+}
+
+impl EngineConfig {
+    /// `bebeu-engine.yml` を探して読む。env > manifest-relative の順。
+    ///
+    /// 見つからなければ default (= 全 `None`)。読めるが壊れている場合は warn して default。
+    pub fn load() -> Self {
+        let path = Self::resolve_path();
+        if !path.exists() {
+            return Self::default();
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(error = %err, path = %path.display(), "engine_config: read failed");
+                return Self::default();
+            }
+        };
+        match serde_saphyr::from_str(&text) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                tracing::warn!(error = %err, path = %path.display(), "engine_config: parse failed");
+                Self::default()
+            }
+        }
+    }
+
+    fn resolve_path() -> PathBuf {
+        if let Some(env) = std::env::var_os("BEATEMUP_ENGINE_CONFIG") {
+            return PathBuf::from(env);
+        }
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bebeu-engine.yml")
     }
 }
 
@@ -182,5 +248,59 @@ mod tests {
                 .join("sprites")
                 .join("001.png"),
         );
+    }
+
+    // RuntimePaths::resolve の優先順は env > yml > manifest fallback。
+    //
+    // env を立てると `std::env::set_var` がプロセス全体に影響して並列テストを汚染するため、
+    // 「yml が指定されたら採用される」「yml も無ければ manifest fallback」の 2 ケースだけ
+    // テストする。env 優先のロジックは目視と smoke test に委ねる。
+    #[test]
+    fn resolve_uses_engine_config_workspace_dir() {
+        let yml_root = PathBuf::from("from").join("yml");
+        let cfg = EngineConfig {
+            workspace_dir: Some(yml_root.clone()),
+            window: None,
+        };
+        // env を unset した状態を期待 (CI / 通常 dev で BEATEMUP_RUNTIME_DIR は立たない想定)。
+        if std::env::var_os("BEATEMUP_RUNTIME_DIR").is_some() {
+            return;
+        }
+        let runtime = RuntimePaths::resolve(&cfg);
+        assert_eq!(runtime.root(), yml_root.as_path());
+    }
+
+    #[test]
+    fn engine_config_default_is_all_none() {
+        let cfg = EngineConfig::default();
+        assert!(cfg.workspace_dir.is_none());
+        assert!(cfg.window.is_none());
+    }
+
+    #[test]
+    fn engine_config_parses_window_block() {
+        let yaml = "window:\n  width: 1280\n  height: 720\n";
+        let cfg: EngineConfig = serde_saphyr::from_str(yaml).expect("parse");
+        assert_eq!(
+            cfg.window,
+            Some(WindowConfig {
+                width: 1280,
+                height: 720
+            })
+        );
+    }
+
+    #[test]
+    fn engine_config_parses_workspace_dir() {
+        let yaml = "workspace_dir: /tmp/runtime\n";
+        let cfg: EngineConfig = serde_saphyr::from_str(yaml).expect("parse");
+        assert_eq!(cfg.workspace_dir, Some(PathBuf::from("/tmp/runtime")));
+    }
+
+    #[test]
+    fn engine_config_empty_yaml_uses_defaults() {
+        let cfg: EngineConfig = serde_saphyr::from_str("{}\n").expect("parse");
+        assert!(cfg.workspace_dir.is_none());
+        assert!(cfg.window.is_none());
     }
 }
