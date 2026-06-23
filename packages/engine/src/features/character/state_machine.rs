@@ -23,7 +23,7 @@ use super::animation::{AnimationFrames, FrameRender};
 use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
 use super::knockback::{Combatant, FinalAction};
-use super::movement::{Enemy, Facing, Player, flip_anchor, total_flip_x};
+use super::movement::{Enemy, Facing, Player, WorldPosition, flip_anchor, total_flip_x};
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CharacterState {
@@ -32,6 +32,24 @@ pub enum CharacterState {
     Walk,
     Attack,
     Hit,
+    /// ジャンプ中 (ADR-0027)。`I` キーで遷移、`vel_y` に `Physics.jump_velocity_y` を充填して
+    /// 上昇。`super::knockback::apply_gravity` が Knockback と同じ重力を積分し、`pos.y <= 0` で
+    /// `Self::Idle` に復帰する。空中でも X/Z 移動入力は受け付ける (`is_locked == false`)。
+    Jump,
+    /// 空中攻撃 (ADR-0027)。`Jump` 中の `J` / `Space` で遷移する Attack 系の独立 state。
+    /// 攻撃 frame の AttackBox は `Attack` と同じ経路 (`is_attack_hit_active`) で発火する。
+    /// `is_locked == true` で他入力を抑止しつつ、`apply_gravity` で落下も継続。Animation 終端
+    /// または着地 (`pos.y <= 0`) で `Self::Idle` に戻る。
+    JumpAttack,
+    /// 立ちガード (ADR-0028)。`L` キー押下中だけ維持され、離すと `Self::Idle` に戻る
+    /// (movement::handle_input 側で毎 frame 入力チェック)。ガード中の被弾は damage /
+    /// knockback_gauge を無傷化し、`guard_gauge` だけが削れる。`is_locked == false` (移動は
+    /// 抑止しないが、attack / jump 入力は handle_input で個別に抑止する)。
+    Guard,
+    /// ガードクラッシュ (ADR-0028)。`guard_gauge <= 0` で `Guard` から遷移する 1 frame 中継。
+    /// 次の state machine tick で `Self::KnockbackUp` に書き換わり、ADR-0024 の吹っ飛びフローへ
+    /// 合流する。`KinematicVel` は遷移時に `Physics.guard_break_knockback` で既に充填済み。
+    GuardBreak,
     /// 吹っ飛び上昇 (ADR-0024)。`KinematicVel` の積分 + gravity を [`super::knockback`]
     /// が回し、vel_y<=0 (apex) で [`Self::KnockbackDown`] に遷移する。
     KnockbackUp,
@@ -74,6 +92,10 @@ impl CharacterState {
             Self::Walk => Role::Walk,
             Self::Attack => Role::Attack,
             Self::Hit => Role::Hit,
+            Self::Jump => Role::Jump,
+            Self::JumpAttack => Role::JumpAttack,
+            Self::Guard => Role::Guard,
+            Self::GuardBreak => Role::GuardBreak,
             Self::KnockbackUp => Role::KnockbackUp,
             Self::KnockbackDown => Role::KnockbackDown,
             Self::BounceUp => Role::BounceUp,
@@ -96,6 +118,8 @@ impl CharacterState {
             self,
             Self::Attack
                 | Self::Hit
+                | Self::JumpAttack
+                | Self::GuardBreak
                 | Self::KnockbackUp
                 | Self::KnockbackDown
                 | Self::BounceUp
@@ -154,17 +178,30 @@ impl Plugin for StateMachinePlugin {
 ///
 /// 吹っ飛びフロー (`KnockbackUp`/`Down`/`LieDown`/`Rise`) は state 遷移が `super::knockback`
 /// (物理 / 固定 timer) 側で起きるので、この generic な末尾 → Idle は適用しない。
-/// `Attack` / `Hit` のみが対象。
+/// `Attack` / `Hit` / `DownAttack` / `JumpAttack` が対象。
+/// `JumpAttack` の Animation 終端では空中なら `Jump` に戻す (= 攻撃ポーズだけ終わる)、
+/// 地上なら `detect_landing` 側で `Idle` に拾われるので何もしない (ADR-0027)。
 fn end_oneshot_actions(
-    mut query: Query<(&AnimationFrames, &mut CharacterState), Without<HitStopState>>,
+    mut query: Query<
+        (&AnimationFrames, &mut CharacterState, &WorldPosition),
+        Without<HitStopState>,
+    >,
 ) {
-    for (anim, mut state) in &mut query {
-        if matches!(
-            *state,
-            CharacterState::Attack | CharacterState::Hit | CharacterState::DownAttack
-        ) && anim.is_finished()
-        {
-            *state = CharacterState::Idle;
+    for (anim, mut state, pos) in &mut query {
+        if !anim.is_finished() {
+            continue;
+        }
+        match *state {
+            CharacterState::Attack | CharacterState::Hit | CharacterState::DownAttack => {
+                *state = CharacterState::Idle;
+            }
+            CharacterState::JumpAttack => {
+                if pos.y > 0.0 {
+                    *state = CharacterState::Jump;
+                }
+                // pos.y <= 0 (着地済み) のときは detect_landing が Idle へ遷移させる。
+            }
+            _ => {}
         }
     }
 }
@@ -413,6 +450,10 @@ mod tests {
         assert_eq!(CharacterState::Walk.to_role(), Role::Walk);
         assert_eq!(CharacterState::Attack.to_role(), Role::Attack);
         assert_eq!(CharacterState::Hit.to_role(), Role::Hit);
+        assert_eq!(CharacterState::Jump.to_role(), Role::Jump);
+        assert_eq!(CharacterState::JumpAttack.to_role(), Role::JumpAttack);
+        assert_eq!(CharacterState::Guard.to_role(), Role::Guard);
+        assert_eq!(CharacterState::GuardBreak.to_role(), Role::GuardBreak);
         assert_eq!(CharacterState::KnockbackUp.to_role(), Role::KnockbackUp);
         assert_eq!(CharacterState::KnockbackDown.to_role(), Role::KnockbackDown);
         assert_eq!(CharacterState::BounceUp.to_role(), Role::BounceUp);
@@ -425,11 +466,16 @@ mod tests {
 
     #[test]
     fn character_state_is_locked_for_oneshot_actions() {
-        // 入力 / AI で上書きされない state: Attack / Hit / 吹っ飛びフロー全部。
+        // 入力 / AI で上書きされない state: Attack / Hit / 吹っ飛びフロー全部 / JumpAttack /
+        // GuardBreak。Jump と Guard は移動 / 入力解除を許すので非 locked。
         assert!(!CharacterState::Idle.is_locked());
         assert!(!CharacterState::Walk.is_locked());
+        assert!(!CharacterState::Jump.is_locked());
+        assert!(!CharacterState::Guard.is_locked());
         assert!(CharacterState::Attack.is_locked());
         assert!(CharacterState::Hit.is_locked());
+        assert!(CharacterState::JumpAttack.is_locked());
+        assert!(CharacterState::GuardBreak.is_locked());
         assert!(CharacterState::KnockbackUp.is_locked());
         assert!(CharacterState::KnockbackDown.is_locked());
         assert!(CharacterState::BounceUp.is_locked());

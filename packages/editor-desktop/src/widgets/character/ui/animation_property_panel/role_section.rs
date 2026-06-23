@@ -226,13 +226,16 @@ fn build_terminator_text(
                 )
             }
         }
-        // Generic (Idle/Walk/Attack/Hit/Block/Jump/DownAttack/Custom)。呼び出し側で表示を抑止する。
+        // Generic (Idle/Walk/Attack/Hit/Guard/GuardBreak/Jump/JumpAttack/DownAttack/Custom)。
+        // 呼び出し側で表示を抑止する。
         Role::Idle
         | Role::Walk
         | Role::Attack
         | Role::Hit
-        | Role::Block
+        | Role::Guard
+        | Role::GuardBreak
         | Role::Jump
+        | Role::JumpAttack
         | Role::DownAttack
         | Role::Custom => "終了条件: 呼び出し側で決定".to_string(),
     }

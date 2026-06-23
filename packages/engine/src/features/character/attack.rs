@@ -34,11 +34,14 @@ use super::state_machine::{CharacterState, EnemyAnimationSet};
 /// 判定根拠は frame の `attack_box_overrides` の有無 (YAML 駆動)。`AnimationFrames` に
 /// 焼き込まれた `current_attack_meta()` を見て、`Some` なら hit active と扱う。
 /// `resolve_hits` (実際の当たり判定) と `hitbox_debug` (可視化) の両方から使う。
-/// `Attack` / `DownAttack` 両方で active 扱い (= 違いは AttackBox 幾何だけ)。
+/// `Attack` / `DownAttack` / `JumpAttack` の 3 state で active 扱い (= 違いは AttackBox
+/// 幾何だけ。Phase は Attack 側と一様、攻撃側の高度差は WorldPosition.y に乗る、ADR-0027)。
 #[must_use]
 pub fn is_attack_hit_active(state: CharacterState, anim: &AnimationFrames) -> bool {
-    matches!(state, CharacterState::Attack | CharacterState::DownAttack)
-        && anim.current_attack_meta().is_some()
+    matches!(
+        state,
+        CharacterState::Attack | CharacterState::DownAttack | CharacterState::JumpAttack
+    ) && anim.current_attack_meta().is_some()
 }
 
 /// player 中心から AttackBox 中心までの前方 X オフセット (画像ピクセル)。
@@ -265,7 +268,10 @@ fn reset_attack_hit_on_attack_start(
     >,
 ) {
     for (state, mut consumed) in &mut query {
-        if matches!(state, CharacterState::Attack | CharacterState::DownAttack) {
+        if matches!(
+            state,
+            CharacterState::Attack | CharacterState::DownAttack | CharacterState::JumpAttack
+        ) {
             consumed.0 = false;
         }
     }
@@ -465,6 +471,51 @@ fn resolve_hits(
                     "attack: down_hit cap reached, hit nullified",
                 );
                 continue;
+            }
+            // ADR-0028: Guard 中の被弾は damage / knockback_gauge を無傷化し、guard_gauge だけ
+            // を `guard_damage` で削る。`guard_gauge <= 0` で GuardBreak に遷移し、
+            // `KinematicVel` に `physics.guard_break_knockback` を Facing 反転して充填する。
+            // 次フレームで `advance_guard_break` が KnockbackUp に書き換えて ADR-0024 の
+            // 吹っ飛びフローに合流する (= 既存の Bounce / Slide / LieDown / Rise を再利用)。
+            if matches!(*enemy_state, CharacterState::Guard) {
+                consumed.0 = true;
+                let att = attenuation(phys.0.knockback_resistance);
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                let guard_damage = (f32::from(u16::try_from(meta.guard_damage).unwrap_or(u16::MAX))
+                    * att)
+                    .round() as i32;
+                combatant.guard_gauge = combatant.guard_gauge.saturating_sub(guard_damage);
+                combatant.guard_recovery_remaining_ticks = ms_to_ticks(phys.0.guard_recovery_ms);
+                tracing::info!(
+                    enemy = ?enemy_entity,
+                    guard_damage,
+                    guard_gauge = combatant.guard_gauge,
+                    "attack: guarded",
+                );
+                if combatant.guard_gauge <= 0 {
+                    // GuardBreak 発動: guard_break_knockback を Facing 反転して KinematicVel に
+                    // 充填、Combatant の knockback 系 runtime state をリセット。state を
+                    // GuardBreak に倒し、advance_guard_break が次 frame で KnockbackUp に変える。
+                    let kb = effective_knockback(phys.0.guard_break_knockback, *facing, att);
+                    vel.vel_x = kb.vel_x;
+                    vel.vel_y = kb.vel_y;
+                    vel.vel_z = kb.vel_z;
+                    combatant.gauge = i32::try_from(phys.0.knockback_threshold).unwrap_or(i32::MAX);
+                    combatant.gauge_recovery_remaining_ticks = 0;
+                    combatant.remaining_bounces = phys.0.bounce_count;
+                    combatant.final_action = FinalAction::LieDown;
+                    combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, *enemy_facing);
+                    combatant.guard_gauge =
+                        i32::try_from(phys.0.guard_break_threshold).unwrap_or(i32::MAX);
+                    combatant.guard_recovery_remaining_ticks = 0;
+                    *enemy_state = CharacterState::GuardBreak;
+                    tracing::info!(
+                        enemy = ?enemy_entity,
+                        vel_x = kb.vel_x, vel_y = kb.vel_y,
+                        "attack: guard broken",
+                    );
+                }
+                break; // Guard 中の hit も 1 attack 1 hit を維持
             }
             consumed.0 = true;
             let outcome = decide_hit(&meta, *facing, enemy_pos.y, &mut combatant, phys);
@@ -680,6 +731,8 @@ mod tests {
             hit_from_behind: false,
             juggle_count: 0,
             down_hit_count: 0,
+            guard_gauge: 100,
+            guard_recovery_remaining_ticks: 0,
         }
     }
 

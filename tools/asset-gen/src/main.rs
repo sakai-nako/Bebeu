@@ -74,6 +74,15 @@ fn write_character(root: &Path, name: &str, palette: &CharacterPalette) -> Resul
     // DownAttack (Phase E2): 足元の AttackBox を持つ下段攻撃 pose。
     write_sprite(&base, "down_attack", 1, 0, palette)?;
     write_sprite(&base, "down_attack", 2, 1, palette)?;
+    // Jump / JumpAttack (ADR-0027)。jump は 1 frame ループ (重力で自然落下中)、
+    // jump_attack は 2 frame (構え / 突き) の Attack 系。
+    write_sprite(&base, "jump", 1, 0, palette)?;
+    write_sprite(&base, "jump_attack", 1, 0, palette)?;
+    write_sprite(&base, "jump_attack", 2, 1, palette)?;
+    // Guard / GuardBreak (ADR-0028)。guard は 1 frame ループ、guard_break は 1 frame の
+    // 中継 (次フレームで KnockbackUp に切り替わる)。
+    write_sprite(&base, "guard", 1, 0, palette)?;
+    write_sprite(&base, "guard_break", 1, 0, palette)?;
     Ok(())
 }
 
@@ -100,6 +109,10 @@ fn write_sprite(
         "dead_lie_down" => render_lie_down_sprite(palette, true),
         "down_hit" => render_down_hit_sprite(palette),
         "down_attack" => render_down_attack_sprite(palette, phase),
+        "jump" => render_jump_sprite(palette),
+        "jump_attack" => render_jump_attack_sprite(palette, phase),
+        "guard" => render_guard_sprite(palette),
+        "guard_break" => render_guard_break_sprite(palette),
         _ => render_character_sprite(palette, phase),
     };
     write_png(&path, SPRITE_W, SPRITE_H, &pixels)
@@ -171,8 +184,8 @@ fn render_hit_sprite(palette: &CharacterPalette) -> Vec<u8> {
     buf
 }
 
-/// 吹っ飛び中 (空中) の sprite。`falling=false` = 上昇 (KnockbackUp / BounceUp 用)、
-/// `falling=true` = 下降 (KnockbackDown / BounceDown 用)。
+/// 吹っ飛び中 (空中) の sprite。`falling=false` = 上昇 (`KnockbackUp` / `BounceUp` 用)、
+/// `falling=true` = 下降 (`KnockbackDown` / `BounceDown` 用)。
 /// 上昇は腕を上に、下降は腕を下に流して空中感を出す。
 fn render_airborne_sprite(palette: &CharacterPalette, falling: bool) -> Vec<u8> {
     let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
@@ -232,8 +245,8 @@ fn render_lie_down_sprite(palette: &CharacterPalette, dead: bool) -> Vec<u8> {
 }
 
 /// 下段攻撃 sprite。phase 0 = しゃがみ構え、phase 1 = 前方下方に拳を突き出す。
-/// AttackBox は YAML 側で `top_left:[32, 78], bottom_right:[48, 90]` の足元位置にセット
-/// (= 倒れた敵の lie_down body box (world Y 0-14) と Y 範囲が overlap、立ち body box には
+/// `AttackBox` は YAML 側で `top_left:[32, 78], bottom_right:[48, 90]` の足元位置にセット
+/// (= 倒れた敵の `lie_down` body box (world Y 0-14) と Y 範囲が overlap、立ち body box には
 /// 当たらない設計)。
 fn render_down_attack_sprite(palette: &CharacterPalette, phase: u32) -> Vec<u8> {
     let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
@@ -253,7 +266,7 @@ fn render_down_attack_sprite(palette: &CharacterPalette, phase: u32) -> Vec<u8> 
     buf
 }
 
-/// `DownHit` 用 sprite。地面に伏せたまま hit を受けた瞬間のポーズ。lie_down ベースに
+/// `DownHit` 用 sprite。地面に伏せたまま hit を受けた瞬間のポーズ。`lie_down` ベースに
 /// 頭の jerk と腕の broadening で「衝撃が来た感」を出す。
 fn render_down_hit_sprite(palette: &CharacterPalette) -> Vec<u8> {
     let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
@@ -269,7 +282,7 @@ fn render_down_hit_sprite(palette: &CharacterPalette) -> Vec<u8> {
     buf
 }
 
-/// `Rise` 用 sprite。半身を起こした kneeling ポーズ。idle と lie_down の中間。
+/// `Rise` 用 sprite。半身を起こした kneeling ポーズ。idle と `lie_down` の中間。
 fn render_rise_sprite(palette: &CharacterPalette) -> Vec<u8> {
     let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
     // 頭: 半分立ち上がった位置 (idle より下、lie_down より上)
@@ -283,6 +296,83 @@ fn render_rise_sprite(palette: &CharacterPalette) -> Vec<u8> {
     // 腕: 支え (左) と上向き (右、起き上がる勢い)
     fill_rect(&mut buf, 8, 60, 6, 16, palette.body);
     fill_rect(&mut buf, 32, 48, 6, 14, palette.body);
+    buf
+}
+
+/// `Jump` 用 sprite (ADR-0027)。両膝を曲げて両腕を上に伸ばす空中姿勢。
+/// pivot は idle と同じ (24, 90) 前提。Y 軸は重力で動くので 1 frame ループ。
+fn render_jump_sprite(palette: &CharacterPalette) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    // 頭は通常位置よりやや上
+    fill_rect(&mut buf, 16, 10, 16, 16, palette.head);
+    // 胴体: 通常より少し縮める (脚を引き寄せた感)
+    fill_rect(&mut buf, 14, 26, 20, 28, palette.body);
+    fill_rect(&mut buf, 14, 50, 20, 4, palette.accent);
+    // 膝を曲げた脚 (画面下に伸ばさず、胴体の真下に折り畳む)
+    fill_rect(&mut buf, 14, 56, 8, 18, palette.body);
+    fill_rect(&mut buf, 26, 56, 8, 18, palette.body);
+    // 両腕を上方向に上げる (= 飛び上がりの勢い)
+    fill_rect(&mut buf, 10, 4, 4, 22, palette.body);
+    fill_rect(&mut buf, 34, 4, 4, 22, palette.body);
+    buf
+}
+
+/// `JumpAttack` 用 sprite (ADR-0027)。phase 0 = 構え (空中で膝抱え)、
+/// phase 1 = 前方に蹴りを出す。AttackBox は YAML 側で前方やや低位置に置く想定。
+fn render_jump_attack_sprite(palette: &CharacterPalette, phase: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    let kick: i32 = if phase == 0 { 0 } else { 12 };
+    // 頭
+    fill_rect(&mut buf, 16, 12, 16, 14, palette.head);
+    // 胴体 (少し前傾)
+    fill_rect(&mut buf, 14, 26, 20, 26, palette.body);
+    fill_rect(&mut buf, 14, 48, 20, 4, palette.accent);
+    // 後ろ脚 (引き脚)
+    fill_rect(&mut buf, 14, 52, 6, 22, palette.body);
+    // 蹴り脚 (phase で前方に伸びる)
+    fill_rect(&mut buf, 28, 50, 4 + kick, 6, palette.body);
+    fill_rect(&mut buf, 32 + kick, 48, 4, 10, palette.accent);
+    // 両腕でバランス (両側に広げる)
+    fill_rect(&mut buf, 4, 30, 10, 4, palette.body);
+    fill_rect(&mut buf, 34, 30, 10, 4, palette.body);
+    buf
+}
+
+/// `Guard` 用 sprite (ADR-0028)。両腕を顔の前で交差させて防御するポーズ。
+/// 立ち姿勢ベース、idle と同じ pivot。
+fn render_guard_sprite(palette: &CharacterPalette) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    // 頭 (やや前傾でガードに合わせる)
+    fill_rect(&mut buf, 16, 14, 16, 14, palette.head);
+    // 胴体
+    fill_rect(&mut buf, 14, 28, 20, 32, palette.body);
+    fill_rect(&mut buf, 14, 54, 20, 4, palette.accent);
+    // 脚 (両足きちんと地面)
+    fill_rect(&mut buf, 16, 60, 6, 28, palette.body);
+    fill_rect(&mut buf, 26, 60, 6, 28, palette.body);
+    // 防御する両腕: 顔の前に水平に並べる (accent 色で「シールド」感)
+    fill_rect(&mut buf, 8, 20, 14, 4, palette.body);
+    fill_rect(&mut buf, 26, 20, 14, 4, palette.body);
+    fill_rect(&mut buf, 10, 24, 28, 4, palette.accent);
+    buf
+}
+
+/// `GuardBreak` 用 sprite (ADR-0028)。ガードが弾かれた瞬間: 腕が左右に弾けて
+/// 上体が後ろにのけぞる。1 frame しか出ない (次 frame で `KnockbackUp` に切り替わる)。
+fn render_guard_break_sprite(palette: &CharacterPalette) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    // 頭 (のけぞって後方 = 画面左に流れる)
+    fill_rect(&mut buf, 12, 12, 16, 16, palette.head);
+    // 胴体 (やや後ろに傾く)
+    fill_rect(&mut buf, 12, 28, 20, 30, palette.body);
+    fill_rect(&mut buf, 12, 54, 20, 4, palette.accent);
+    // 脚 (踏みとどまる)
+    fill_rect(&mut buf, 14, 60, 6, 28, palette.body);
+    fill_rect(&mut buf, 26, 60, 6, 28, palette.body);
+    // 腕が弾け飛んだ感: 左腕は後方、右腕は前方に大きく振り回される
+    fill_rect(&mut buf, 0, 28, 12, 4, palette.body);
+    fill_rect(&mut buf, 32, 28, 16, 4, palette.body);
+    fill_rect(&mut buf, 44, 32, 4, 6, palette.accent);
     buf
 }
 

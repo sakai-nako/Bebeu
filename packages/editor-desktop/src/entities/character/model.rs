@@ -79,6 +79,15 @@ pub struct CharacterPhysics {
     /// ヒットしても素通り) になる (= 倒れたまま無敵、永久パターン回避)。
     /// Rise → Idle で counter は reset される。
     pub max_down_hit_count: u32,
+    /// Guard ゲージの初期値 / max (ADR-0028)。`AttackBoxMeta.guard_damage` で削られて
+    /// 0 以下になると GuardBreak 発動。
+    pub guard_break_threshold: u32,
+    /// 最後にガード被弾してから何 ms で `guard_gauge` を full 回復するか (ADR-0028)。
+    /// `hit_recovery_ms` と同型の自然回復モデル。
+    pub guard_recovery_ms: u32,
+    /// GuardBreak 発動時に被弾側へ充填する吹っ飛びベクトル (ADR-0028)。
+    /// `KnockbackVec` と同じく `vel_x` は「攻撃側前方 = +」基準で書き、scene 側で Facing 反転する。
+    pub guard_break_knockback: crate::shared::KnockbackVec,
 }
 
 impl Default for CharacterPhysics {
@@ -96,6 +105,13 @@ impl Default for CharacterPhysics {
             rise_duration_ms: 300,
             max_juggle_count: 3,
             max_down_hit_count: 3,
+            guard_break_threshold: 100,
+            guard_recovery_ms: 1200,
+            guard_break_knockback: crate::shared::KnockbackVec {
+                vel_x: 100.0,
+                vel_y: 150.0,
+                vel_z: 0.0,
+            },
         }
     }
 }

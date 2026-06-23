@@ -1,0 +1,12 @@
+name: guard_break
+number: 15
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [12, 12]
+    bottom_right: [32, 60]
+    depth: 16

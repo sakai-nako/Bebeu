@@ -8,7 +8,7 @@
 //! - Custom は unit variant の「役割なし」スロット。AI scripting / カスタム必殺技用。
 //!   Custom の Animation を ikemen export で参照したい場合は `Animation.export_number` を
 //!   手動で持たせる (model.rs 参照)。
-//! - Single-cardinality role (Idle/Walk/Block) は variant=0 のみ。Multi-cardinality role
+//! - Single-cardinality role (Idle/Walk/Guard) は variant=0 のみ。Multi-cardinality role
 //!   (Attack/Hit/Dead/Jump) は variant 0,1,2,... で弱/中/強や down 種別を区別する。
 //! - Walk の前後区別が必要になったら BackWalk role を別途追加する想定 (今回は enum に入れない)。
 
@@ -22,8 +22,15 @@ pub enum Role {
     Idle,
     Walk,
     Attack,
-    Block,
+    /// 立ちガード (ADR-0028)。旧 `block` YAML は serde alias でこの variant に読み替える。
+    #[serde(alias = "block")]
+    Guard,
+    /// ガードクラッシュ (ADR-0028)。`guard_gauge <= 0` で発動する 1 frame 中継 Role。
+    /// engine 側で次フレームに `KnockbackUp` に書き換わるため Animation 終端は意識しない。
+    GuardBreak,
     Jump,
+    /// 空中攻撃 (ADR-0027)。`Jump` 中の `J` / `Space` で発動する Attack 系の独立 Role。
+    JumpAttack,
     Hit,
     // Knockback フロー (通常被弾時の物理ステージ群)。すべて single-cardinality。
     KnockbackUp,
@@ -110,8 +117,10 @@ impl Role {
             Role::Idle,
             Role::Walk,
             Role::Attack,
-            Role::Block,
+            Role::Guard,
+            Role::GuardBreak,
             Role::Jump,
+            Role::JumpAttack,
             Role::Hit,
             Role::KnockbackUp,
             Role::KnockbackDown,
@@ -152,8 +161,10 @@ impl Role {
             Role::Idle => "Idle",
             Role::Walk => "Walk",
             Role::Attack => "Attack",
-            Role::Block => "Block",
+            Role::Guard => "Guard",
+            Role::GuardBreak => "GuardBreak",
             Role::Jump => "Jump",
+            Role::JumpAttack => "JumpAttack",
             Role::Hit => "Hit",
             Role::KnockbackUp => "KnockbackUp",
             Role::KnockbackDown => "KnockbackDown",
@@ -198,8 +209,10 @@ impl Role {
             self,
             Role::Idle
                 | Role::Walk
-                | Role::Block
+                | Role::Guard
+                | Role::GuardBreak
                 | Role::Jump
+                | Role::JumpAttack
                 | Role::KnockbackUp
                 | Role::KnockbackDown
                 | Role::BounceUp
@@ -228,8 +241,10 @@ impl Role {
             Role::Idle => "idle",
             Role::Walk => "walk",
             Role::Attack => "attack",
-            Role::Block => "block",
+            Role::Guard => "guard",
+            Role::GuardBreak => "guard_break",
             Role::Jump => "jump",
+            Role::JumpAttack => "jump_attack",
             Role::Hit => "hit",
             Role::KnockbackUp => "knockback_up",
             Role::KnockbackDown => "knockback_down",
@@ -270,8 +285,11 @@ impl Role {
             "idle" => Role::Idle,
             "walk" => Role::Walk,
             "attack" => Role::Attack,
-            "block" => Role::Block,
+            // ADR-0028: `block` は旧 YAML の alias として残し、`guard` を正規表現とする。
+            "guard" | "block" => Role::Guard,
+            "guard_break" => Role::GuardBreak,
             "jump" => Role::Jump,
+            "jump_attack" => Role::JumpAttack,
             "hit" => Role::Hit,
             "knockback_up" => Role::KnockbackUp,
             "knockback_down" => Role::KnockbackDown,
@@ -308,7 +326,8 @@ impl Role {
 
     /// Role セレクタの option label に出す表示文字列。`terminator_kind()` に応じて
     /// `"KnockbackUp [物理駆動]"` のようなブラケット表記を併記する。`Generic` の Role
-    /// (Idle / Walk / Attack / Hit / Block / Jump / Custom) はブラケット併記なし。
+    /// (Idle / Walk / Attack / Hit / Guard / GuardBreak / Jump / JumpAttack / Custom) は
+    /// ブラケット併記なし。
     #[must_use]
     pub fn selector_label(self) -> String {
         match self.terminator_kind().short_hint() {
@@ -350,8 +369,10 @@ impl Role {
             | Role::Walk
             | Role::Attack
             | Role::Hit
-            | Role::Block
+            | Role::Guard
+            | Role::GuardBreak
             | Role::Jump
+            | Role::JumpAttack
             | Role::DownAttack
             | Role::Custom => TerminatorKind::Generic,
         }

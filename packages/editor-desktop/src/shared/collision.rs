@@ -38,6 +38,9 @@ pub struct AttackBoxMeta {
     pub knockback_damage: u32,
     /// 吹っ飛び発動時に被弾側 movement.State.VelX/Y/Z に充填されるベクトル。
     pub knockback: KnockbackVec,
+    /// Guard 中の被弾で削る guard_gauge 量 (ADR-0028)。0 でも Guard 中の damage /
+    /// knockback_gauge は無効化される (= ガード成立中は無傷)。
+    pub guard_damage: u32,
     /// hit 瞬間の time freeze + sprite 揺らし演出。`None` で hit_stop なし (= 即座に通常の
     /// Hit state へ遷移)。engine 側 [`engine::entities::character::HitStop`] と同 schema。
     #[serde(skip_serializing_if = "Option::is_none")]

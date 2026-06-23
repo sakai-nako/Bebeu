@@ -1,0 +1,39 @@
+name: jump_attack
+number: 14
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [14, 12]
+    bottom_right: [34, 56]
+    depth: 16
+  attack_boxes: null
+- index: 1
+  path: 002.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [14, 12]
+    bottom_right: [34, 56]
+    depth: 16
+  attack_boxes:
+  - hitbox:
+      top_left:
+      - 30
+      - 44
+      bottom_right:
+      - 48
+      - 60
+      depth: 16
+    meta:
+      damage: 35
+      knockback_damage: 60
+      knockback:
+        vel_x: 80.0
+        vel_y: 250.0
+        vel_z: 0.0
+      guard_damage: 35

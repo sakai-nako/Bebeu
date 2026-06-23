@@ -1,0 +1,45 @@
+name: jump_attack
+role: jump_attack
+variant: 0
+is_loop: false
+loop_start_index: 0
+frames:
+- index: 0
+  ticks: 4
+  flip: null
+  pivot_point_offset: null
+  body_box_overrides: null
+  attack_box_overrides: null
+  layers:
+  - index: 0
+    sprite_group_number: 14
+    sprite_index: 0
+    transparency: 1.0
+    flip: null
+    pivot_point_offset: null
+- index: 1
+  ticks: 10
+  flip: null
+  pivot_point_offset: null
+  body_box_overrides: null
+  attack_box_overrides:
+  - meta:
+      damage: 35
+      knockback_damage: 60
+      knockback:
+        vel_x: 80.0
+        vel_y: 250.0
+        vel_z: 0.0
+      guard_damage: 35
+      hit_stop:
+        shake_x: -4
+        shake_y: 2
+        count: 4
+        decay: 0.2
+  layers:
+  - index: 0
+    sprite_group_number: 14
+    sprite_index: 1
+    transparency: 1.0
+    flip: null
+    pivot_point_offset: null

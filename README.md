@@ -14,6 +14,12 @@ For now, this is a personal hobby project, shared in the open in case anyone fin
 
 Early scaffolding. APIs, data formats, and the editor UI are all still in motion. Expect breaking changes.
 
+## Contributing
+
+Issues and bug reports are welcome.
+Pull requests are currently invite-only — please open an issue first
+so we can talk about the change before you spend time on it.
+
 ## Platforms
 
 Developed and tested on Windows 11. The engine (Bevy) should work on Linux and macOS, but the editor (Dioxus desktop) and the `just` recipes (which assume a POSIX shell) haven't been verified on those platforms.
@@ -112,6 +118,12 @@ Rust 製のベルトスクロールアクション engine (Bevy) と、それ専
 ## 状態
 
 スキャフォールディング段階で、API・データ形式・editor UI とも頻繁に変わります。破壊的変更を許容してください。
+
+## コントリビューション
+
+Issue / バグ報告は歓迎します。
+Pull Request は現状 invite 制で運用しているので、まず Issue を立てて
+方針をすり合わせてから着手してください。
 
 ## プラットフォーム
 

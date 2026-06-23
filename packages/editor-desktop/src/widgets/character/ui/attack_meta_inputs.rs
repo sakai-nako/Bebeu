@@ -60,6 +60,14 @@ pub(super) fn AttackMetaInputs(
             });
         }
     };
+    let on_guard_damage = move |evt: Event<FormData>| {
+        if let Ok(v) = evt.value().trim().parse::<u32>() {
+            apply(AttackBoxMeta {
+                guard_damage: v,
+                ..current
+            });
+        }
+    };
     let on_vel_x = move |evt: Event<FormData>| {
         if let Ok(v) = evt.value().trim().parse::<f32>() {
             apply(AttackBoxMeta {
@@ -198,6 +206,20 @@ pub(super) fn AttackMetaInputs(
                             min: "0",
                             value: "{current.knockback_damage}",
                             onchange: on_kb_damage,
+                        }
+                    }
+                    div { class: "{pair_class}",
+                        span {
+                            class: "{label_class}",
+                            title: "Guard ゲージ減算量 (ADR-0028)",
+                            "GRD"
+                        }
+                        input {
+                            r#type: "number",
+                            class: "{input_class}",
+                            min: "0",
+                            value: "{current.guard_damage}",
+                            onchange: on_guard_damage,
                         }
                     }
                 }

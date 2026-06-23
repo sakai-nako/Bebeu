@@ -14,6 +14,7 @@ use crate::shared::projection;
 
 use super::animation::{AnimationFrames, AnimationSet, VSYNC_TICK_SECS};
 use super::debug_control::SimulationSet;
+use super::knockback::{KinematicVel, PhysicsParams};
 use super::state_machine::CharacterState;
 
 /// Player を 1 体だけ識別する marker component。
@@ -93,7 +94,16 @@ impl Plugin for MovementPlugin {
 fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
     level: Option<Res<Level>>,
-    mut query: Query<(&mut WorldPosition, &mut Facing, &mut CharacterState), With<Player>>,
+    mut query: Query<
+        (
+            &mut WorldPosition,
+            &mut Facing,
+            &mut CharacterState,
+            &mut KinematicVel,
+            &PhysicsParams,
+        ),
+        With<Player>,
+    >,
 ) {
     // 60Hz 固定。`time.delta()` を読むと vsync ブレが乗って snap step pattern が
     // 不規則化するため、Update = vsync = 1 frame の前提で hardcode する。
@@ -117,6 +127,10 @@ fn handle_input(
     let attack_pressed = keys.just_pressed(KeyCode::Space) || keys.just_pressed(KeyCode::KeyJ);
     // 下段攻撃 (倒れた敵向けの低位置 AttackBox)。`K` キー。
     let down_attack_pressed = keys.just_pressed(KeyCode::KeyK);
+    // ジャンプ (ADR-0027): `I` キー、地上 (pos.y == 0) でのみ受付。
+    let jump_pressed = keys.just_pressed(KeyCode::KeyI);
+    // ガード (ADR-0028): `L` キー押下中だけ維持。離すと Idle に戻る (Guard 経路で処理)。
+    let guard_pressed = keys.pressed(KeyCode::KeyL);
     let move_target_state = if dx == 0.0 && dz == 0.0 {
         CharacterState::Idle
     } else {
@@ -124,10 +138,49 @@ fn handle_input(
     };
     // Level 未設定なら制限なし扱い (ADR-0022 の fail-soft)
     let contains = |x: f32, z: f32| level.as_deref().is_none_or(|l| l.contains_xz(x, z));
-    for (mut pos, mut facing, mut state) in &mut query {
+    for (mut pos, mut facing, mut state, mut vel, phys) in &mut query {
+        // Jump 中 (非 locked): 空中移動と向き更新を許し、attack キーで JumpAttack へ。
+        // Y 軸物理は knockback::apply_gravity / apply_velocity / detect_landing が回す。
+        if matches!(*state, CharacterState::Jump) {
+            if dx != 0.0 || dz != 0.0 {
+                let next = step_axis_aware(*pos, dx, dz, contains);
+                pos.x = next.x;
+                pos.z = next.z;
+                if dx > 0.0 {
+                    *facing = Facing::Right;
+                } else if dx < 0.0 {
+                    *facing = Facing::Left;
+                }
+            }
+            if attack_pressed {
+                *state = CharacterState::JumpAttack;
+            }
+            continue;
+        }
         if state.is_locked() {
-            // Attack 中は移動・向き変更・state 書き換え (Idle/Walk への落下) を抑制。
-            // 攻撃キーの先行入力もここでは捨てる (連打キャンセル等は別途設計)。
+            // Attack / JumpAttack / Hit / 吹っ飛びフロー / GuardBreak は入力で上書きしない。
+            continue;
+        }
+        // Guard 中 (非 locked): L 離すと Idle、押下続いていれば Guard 維持。
+        // ガード中は移動 / 攻撃 / ジャンプ入力を全て無視 (= 完全停止)。
+        if matches!(*state, CharacterState::Guard) {
+            if !guard_pressed {
+                *state = CharacterState::Idle;
+            }
+            continue;
+        }
+        // 地上の通常入力。優先度: Guard > Jump > Attack > DownAttack > 移動。
+        // Guard と Jump は地上 (pos.y == 0) のみ受付 (空中ガード / 二段ジャンプ無し、ADR-0027/0028)。
+        if guard_pressed && pos.y == 0.0 {
+            *state = CharacterState::Guard;
+            continue;
+        }
+        if jump_pressed && pos.y == 0.0 {
+            // Y 速度に jump_velocity_y を充填して上昇開始。X/Z は当 frame の入力で別途進む。
+            #[allow(clippy::cast_possible_truncation)]
+            let jv = phys.0.jump_velocity_y as f32;
+            vel.vel_y = jv;
+            *state = CharacterState::Jump;
             continue;
         }
         if attack_pressed {

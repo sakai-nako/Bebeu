@@ -238,6 +238,8 @@ mod tests {
             hit_from_behind: false,
             juggle_count: 0,
             down_hit_count: 0,
+            guard_gauge: 80,
+            guard_recovery_remaining_ticks: 0,
         }
     }
 

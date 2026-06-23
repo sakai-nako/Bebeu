@@ -24,6 +24,10 @@ pub const DEFAULT_GROUND_FRICTION: f64 = 600.0;
 pub const DEFAULT_HIT_RECOVERY_MS: u32 = 1500;
 pub const DEFAULT_LIE_DOWN_DURATION_MS: u32 = 800;
 pub const DEFAULT_RISE_DURATION_MS: u32 = 300;
+/// Guard ゲージの初期値 / max (ADR-0028)。`guard_damage` で削られて 0 以下になると GuardBreak 発動。
+pub const DEFAULT_GUARD_BREAK_THRESHOLD: u32 = 100;
+/// 最後にガード被弾してから何 ms で guard_gauge を full 回復するか (ADR-0028)。
+pub const DEFAULT_GUARD_RECOVERY_MS: u32 = 1200;
 /// 1 連続コンボあたりの空中再被弾 (= ジャグル) 最大回数。これを超えた airborne hit は
 /// **完全無敵** (damage / state / gauge / consumed 全て不発) で素通りする (= 敵を当て続けても
 /// 落下フローが進む。永久パターン回避)。
@@ -35,8 +39,9 @@ pub const DEFAULT_MAX_DOWN_HIT_COUNT: u32 = 3;
 
 // === Role ===
 
-/// Animation の役割。engine 側 State (Idle/Walk/Attack/Hit/Jump/Block + 吹っ飛び flow) と
-/// semantic に紐付ける。役割なしの YAML や Custom Animation は [`Role::Custom`] として扱う。
+/// Animation の役割。engine 側 State (Idle/Walk/Attack/Hit/Jump/JumpAttack/Guard/GuardBreak +
+/// 吹っ飛び flow) と semantic に紐付ける。役割なしの YAML や Custom Animation は
+/// [`Role::Custom`] として扱う。
 ///
 /// Knockback 系 (7 個 × 4 軸 = 通常 / Back / Dead / DeadBack の prefix; Rise は Dead 系 2 つを
 /// 持たない) は ADR-0024/0025 の吹っ飛びフローに対応する。Animation 解決は
@@ -44,6 +49,7 @@ pub const DEFAULT_MAX_DOWN_HIT_COUNT: u32 = 3;
 /// `(state, hit_from_behind, final_action)` から 4 段フォールバック chain を試行する。
 ///
 /// 旧 `dead` role は [`Role::DeadLieDown`] に集約 (serde alias で旧 YAML 互換)。
+/// 旧 `block` role は [`Role::Guard`] に rename (ADR-0028、serde alias で旧 YAML 互換)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -52,7 +58,15 @@ pub enum Role {
     Attack,
     Hit,
     Jump,
-    Block,
+    /// 空中攻撃 (ADR-0027)。Jump 中の `J` / `Space` で発動する Attack の独立 variant。
+    JumpAttack,
+    /// 立ちガード (ADR-0028)。旧 `block` role は serde alias でこの variant に読み替える。
+    #[serde(alias = "block")]
+    Guard,
+    /// ガードクラッシュ (ADR-0028)。`guard_gauge <= 0` で 1〜数 frame 見せ、その後 KnockbackUp に
+    /// 合流する中継 state 用の Animation Role。Back / Dead prefix variant は持たない (= 後続の
+    /// Knockback フロー側で被弾方向 / 致命傷の prefix variant が選ばれるため、ここでは不要)。
+    GuardBreak,
     KnockbackUp,
     KnockbackDown,
     BounceUp,
@@ -102,7 +116,9 @@ impl Role {
             Role::Attack,
             Role::Hit,
             Role::Jump,
-            Role::Block,
+            Role::JumpAttack,
+            Role::Guard,
+            Role::GuardBreak,
             Role::KnockbackUp,
             Role::KnockbackDown,
             Role::BounceUp,
@@ -171,6 +187,18 @@ pub struct Physics {
     /// Rise → Idle で counter は reset される。
     #[serde(default)]
     pub max_down_hit_count: u32,
+    /// Guard ゲージの初期値 / max (ADR-0028)。`AttackBoxMeta.guard_damage` で削られて
+    /// 0 以下になると GuardBreak 発動。
+    #[serde(default)]
+    pub guard_break_threshold: u32,
+    /// 最後にガード被弾してから何 ms で `guard_gauge` を full 回復するか (ADR-0028)。
+    /// `hit_recovery_ms` と同型の自然回復モデル。
+    #[serde(default)]
+    pub guard_recovery_ms: u32,
+    /// GuardBreak 発動時に被弾側へ充填する吹っ飛びベクトル (ADR-0028)。
+    /// `KnockbackVec` と同じく `vel_x` は「攻撃側前方 = +」基準で書き、scene 側で Facing 反転する。
+    #[serde(default)]
+    pub guard_break_knockback: KnockbackVec,
 }
 
 impl Default for Physics {
@@ -188,6 +216,14 @@ impl Default for Physics {
             rise_duration_ms: DEFAULT_RISE_DURATION_MS,
             max_juggle_count: DEFAULT_MAX_JUGGLE_COUNT,
             max_down_hit_count: DEFAULT_MAX_DOWN_HIT_COUNT,
+            guard_break_threshold: DEFAULT_GUARD_BREAK_THRESHOLD,
+            guard_recovery_ms: DEFAULT_GUARD_RECOVERY_MS,
+            // GuardBreak 既定: knockback と同等の弱めの吹っ飛びを起こして、ADR-0024 のフローへ。
+            guard_break_knockback: KnockbackVec {
+                vel_x: 100.0,
+                vel_y: 150.0,
+                vel_z: 0.0,
+            },
         }
     }
 }
@@ -334,6 +370,10 @@ pub struct AttackBoxMeta {
     pub damage: u32,
     pub knockback_damage: u32,
     pub knockback: KnockbackVec,
+    /// Guard 中の被弾で削る guard_gauge 量 (ADR-0028)。
+    /// 0 でも Guard 中の damage / knockback_gauge は無効化される (= ガード成立中は無傷)。
+    /// 「ガード不能」を表したい場合は将来 `guard_break_only: bool` 等で別途表現する。
+    pub guard_damage: u32,
     /// hit が決まった瞬間に発生する time freeze + sprite 揺らし演出。`None` で hit_stop なし
     /// (= 即座に通常の Hit state へ遷移)。詳細は [`HitStop`]。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -481,6 +521,18 @@ mod tests {
         assert_eq!(p.rise_duration_ms, DEFAULT_RISE_DURATION_MS);
         assert_eq!(p.max_juggle_count, DEFAULT_MAX_JUGGLE_COUNT);
         assert_eq!(p.max_down_hit_count, DEFAULT_MAX_DOWN_HIT_COUNT);
+        assert_eq!(p.guard_break_threshold, DEFAULT_GUARD_BREAK_THRESHOLD);
+        assert_eq!(p.guard_recovery_ms, DEFAULT_GUARD_RECOVERY_MS);
+        assert_eq!(p.guard_break_knockback.vel_x, 100.0);
+        assert_eq!(p.guard_break_knockback.vel_y, 150.0);
+        assert_eq!(p.guard_break_knockback.vel_z, 0.0);
+    }
+
+    #[test]
+    fn role_block_yaml_alias_reads_as_guard() {
+        // 旧 YAML (`role: block`) が新 `Role::Guard` に読み替えられること (ADR-0028 互換)。
+        let role: Role = serde_saphyr::from_str("block").expect("alias should parse");
+        assert_eq!(role, Role::Guard);
     }
 
     #[test]

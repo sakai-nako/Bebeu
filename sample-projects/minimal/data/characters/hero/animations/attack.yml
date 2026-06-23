@@ -30,6 +30,7 @@ frames:
         vel_x: 40.0
         vel_y: 320.0
         vel_z: 0.0
+      guard_damage: 30
       hit_stop:
         shake_x: -5
         shake_y: 0

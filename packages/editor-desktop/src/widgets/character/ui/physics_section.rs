@@ -28,6 +28,8 @@ pub fn PhysicsSection(character: Character) -> Element {
         PhysicsU32Field::RiseDurationMs,
         PhysicsU32Field::MaxJuggleCount,
         PhysicsU32Field::MaxDownHitCount,
+        PhysicsU32Field::GuardBreakThreshold,
+        PhysicsU32Field::GuardRecoveryMs,
     ];
 
     rsx! {

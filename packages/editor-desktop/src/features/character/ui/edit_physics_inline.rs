@@ -87,6 +87,8 @@ pub enum PhysicsU32Field {
     RiseDurationMs,
     MaxJuggleCount,
     MaxDownHitCount,
+    GuardBreakThreshold,
+    GuardRecoveryMs,
 }
 
 impl PhysicsU32Field {
@@ -99,6 +101,8 @@ impl PhysicsU32Field {
             Self::RiseDurationMs => p.rise_duration_ms,
             Self::MaxJuggleCount => p.max_juggle_count,
             Self::MaxDownHitCount => p.max_down_hit_count,
+            Self::GuardBreakThreshold => p.guard_break_threshold,
+            Self::GuardRecoveryMs => p.guard_recovery_ms,
         }
     }
 
@@ -111,6 +115,8 @@ impl PhysicsU32Field {
             Self::RiseDurationMs => p.rise_duration_ms = v,
             Self::MaxJuggleCount => p.max_juggle_count = v,
             Self::MaxDownHitCount => p.max_down_hit_count = v,
+            Self::GuardBreakThreshold => p.guard_break_threshold = v,
+            Self::GuardRecoveryMs => p.guard_recovery_ms = v,
         }
     }
 
@@ -124,6 +130,8 @@ impl PhysicsU32Field {
             Self::RiseDurationMs => "Rise (ms)",
             Self::MaxJuggleCount => "Max Juggle Count",
             Self::MaxDownHitCount => "Max DownHit Count",
+            Self::GuardBreakThreshold => "Guard Gauge",
+            Self::GuardRecoveryMs => "Guard Recovery (ms)",
         }
     }
 
@@ -150,6 +158,12 @@ impl PhysicsU32Field {
             }
             Self::MaxDownHitCount => {
                 "1 連続コンボあたりの DownHit (倒れ中被弾) 最大回数。これを超えた down hit は完全無敵 (damage も入らず素通り) になる (= 倒れたまま無敵)。Rise → Idle で reset"
+            }
+            Self::GuardBreakThreshold => {
+                "Guard ゲージの最大値 (ADR-0028)。Guard 中の被弾で guard_damage 分削られ、0 以下で GuardBreak (= 強制吹っ飛び) 発動 → full 回復"
+            }
+            Self::GuardRecoveryMs => {
+                "最後にガード被弾してから Guard ゲージが full 回復するまでの待ち (ms)。hit_recovery_ms と同型"
             }
         }
     }
@@ -391,6 +405,8 @@ mod tests {
             PhysicsU32Field::RiseDurationMs,
             PhysicsU32Field::MaxJuggleCount,
             PhysicsU32Field::MaxDownHitCount,
+            PhysicsU32Field::GuardBreakThreshold,
+            PhysicsU32Field::GuardRecoveryMs,
         ] {
             f.set(&mut p, 999);
             assert_eq!(f.get(&p), 999);

@@ -77,6 +77,13 @@ pub struct Combatant {
     /// 素通り) になる (= 倒れたまま無敵)。
     /// Rise → Idle で 0 に reset。
     pub down_hit_count: u32,
+    /// Guard 中の被弾で削られる guard ゲージ (ADR-0028)。`Physics.guard_break_threshold` で
+    /// 初期化し、`AttackBoxMeta.guard_damage` で削る。0 以下で GuardBreak 発動 (= KnockbackUp
+    /// に遷移して既存物理に合流)。
+    pub guard_gauge: i32,
+    /// 直近のガード被弾から続いている回復までの残り tick。0 で「回復中ではない」。
+    /// `Physics.guard_recovery_ms` を tick 換算した値をガード被弾時に充填する。
+    pub guard_recovery_remaining_ticks: u32,
 }
 
 impl Combatant {
@@ -93,6 +100,8 @@ impl Combatant {
             hit_from_behind: false,
             juggle_count: 0,
             down_hit_count: 0,
+            guard_gauge: i32::try_from(physics.guard_break_threshold).unwrap_or(i32::MAX),
+            guard_recovery_remaining_ticks: 0,
         }
     }
 }
@@ -126,11 +135,13 @@ impl Plugin for KnockbackPlugin {
             Update,
             (
                 recover_gauge,
+                recover_guard_gauge,
                 apply_gravity,
                 apply_slide_friction,
                 apply_velocity,
                 transition_at_apex,
                 detect_landing,
+                advance_guard_break,
                 advance_stage_timer,
             )
                 .chain()
@@ -163,7 +174,34 @@ fn recover_gauge(mut q: Query<(&mut Combatant, &PhysicsParams), Without<HitStopS
     }
 }
 
-/// 吹っ飛びの空中ステージ (KnockbackUp/Down + BounceUp/Down) 中、Y 軸速度に重力を加算する。
+/// ADR-0028: ガード被弾から `guard_recovery_ms` 経過したら `guard_gauge` を
+/// `guard_break_threshold` まで戻す。`recover_gauge` と同型の自然回復モデル。
+fn recover_guard_gauge(mut q: Query<(&mut Combatant, &PhysicsParams), Without<HitStopState>>) {
+    for (mut combatant, phys) in &mut q {
+        if combatant.guard_recovery_remaining_ticks == 0 {
+            continue;
+        }
+        combatant.guard_recovery_remaining_ticks -= 1;
+        if combatant.guard_recovery_remaining_ticks == 0 {
+            combatant.guard_gauge = i32::try_from(phys.0.guard_break_threshold).unwrap_or(i32::MAX);
+        }
+    }
+}
+
+/// ADR-0028: `GuardBreak` は 1 frame の中継 state。`KinematicVel` は遷移時に
+/// `guard_break_knockback` で既に充填済みなので、次フレームで `KnockbackUp` に書き換えて
+/// ADR-0024 の吹っ飛びフローに合流させる。`Combatant.remaining_bounces` / `final_action` /
+/// `hit_from_behind` は GuardBreak 遷移時に attack 解決側がリセット済み。
+fn advance_guard_break(mut q: Query<&mut CharacterState, Without<HitStopState>>) {
+    for mut state in &mut q {
+        if matches!(*state, CharacterState::GuardBreak) {
+            *state = CharacterState::KnockbackUp;
+        }
+    }
+}
+
+/// 吹っ飛びの空中ステージ (KnockbackUp/Down + BounceUp/Down) と Jump / JumpAttack
+/// (ADR-0027) 中、Y 軸速度に重力を加算する。
 /// `Physics.gravity` は「正値 = 落下方向」として書かれており、world Y は「上が +」なので
 /// 加算ではなく **減算** で「下向きに加速」を表す。Slide / LieDown / Rise では gravity を
 /// 適用しない (地面に乗っている)。dt は 60Hz 固定 (= `VSYNC_TICK_SECS`)。
@@ -177,6 +215,8 @@ fn apply_gravity(
                 | CharacterState::KnockbackDown
                 | CharacterState::BounceUp
                 | CharacterState::BounceDown
+                | CharacterState::Jump
+                | CharacterState::JumpAttack
         ) {
             // gravity は YAML で書ける f64 だが、実値は < ~1e4 (= 800 程度)。f32 mantissa
             // 23bit に十分収まるので truncation 警告は意図的に抑える。
@@ -232,9 +272,12 @@ fn apply_friction_step(vel: f32, decel: f32, dt: f32) -> f32 {
     }
 }
 
-/// 吹っ飛び中 (空中 + Slide) は `KinematicVel` を `WorldPosition` に積分する。
-/// 直前の `apply_gravity` / `apply_slide_friction` が当 frame の vel を更新しているので、
-/// semi-implicit Euler になる。Idle/Walk 等は通常 movement system が触る。
+/// 吹っ飛び中 (空中 + Slide) と Jump / JumpAttack は `KinematicVel` を `WorldPosition` に
+/// 積分する。直前の `apply_gravity` / `apply_slide_friction` が当 frame の vel を更新して
+/// いるので、semi-implicit Euler になる。Idle/Walk 等は通常 movement system が触る。
+/// Jump / JumpAttack は X/Z 移動を handle_input 側が直接 `pos` に書く設計なので、ここでは
+/// `vel.vel_y` だけが意味を持つ (= 重力での落下)。`vel.vel_x` / `vel.vel_z` も加算は走るが、
+/// Jump 開始時に充填されていなければ 0 のまま。
 fn apply_velocity(
     mut q: Query<(&CharacterState, &KinematicVel, &mut WorldPosition), Without<HitStopState>>,
 ) {
@@ -246,6 +289,8 @@ fn apply_velocity(
                 | CharacterState::BounceUp
                 | CharacterState::BounceDown
                 | CharacterState::Slide
+                | CharacterState::Jump
+                | CharacterState::JumpAttack
         ) {
             pos.x += vel.vel_x * VSYNC_TICK_SECS;
             pos.y += vel.vel_y * VSYNC_TICK_SECS;
@@ -275,6 +320,10 @@ fn transition_at_apex(mut q: Query<(&mut CharacterState, &KinematicVel), Without
 /// 着地検知。`KnockbackDown` / `BounceDown` 中で `y <= 0` になったら、
 /// `remaining_bounces > 0` なら **Bounce** (vel_y 反転 + dampening、`BounceUp` へ、残数 -1)、
 /// ゼロなら **Slide** (vel_y を 0 にして地面を滑る) に分岐する。pos.y は 0 に clamp。
+///
+/// Jump / JumpAttack 中で `y <= 0` (= 着地) のときは `Idle` に復帰し、`vel_y = 0` / `vel_x = 0`
+/// / `vel_z = 0` にリセットする (ADR-0027)。空中での X/Z 移動は `handle_input` が直接 `pos` に
+/// 書いているので vel は基本 0 のままだが、念のためここでクリアする。
 fn detect_landing(
     mut q: Query<
         (
@@ -288,29 +337,39 @@ fn detect_landing(
     >,
 ) {
     for (mut state, mut pos, mut vel, phys, mut combatant) in &mut q {
-        let landing = matches!(
+        let knockback_landing = matches!(
             *state,
             CharacterState::KnockbackDown | CharacterState::BounceDown
         ) && pos.y <= 0.0;
-        if !landing {
-            continue;
-        }
-        pos.y = 0.0;
-        if combatant.remaining_bounces > 0 {
-            // Bounce: vel_y を反転して dampening、vel_x/vel_z も同 dampening。
-            // bounce_dampening=0 は YAML 上「跳ねない」の表現としても使われるので、その場合は
-            // 反転速度が 0 になり、次 tick で transition_at_apex が即 BounceDown に倒し、
-            // 同 tick の detect_landing でまた処理される (= 残数を消費しながら最終的に Slide)。
-            let damp = phys.0.bounce_dampening;
-            vel.vel_x *= damp;
-            vel.vel_z *= damp;
-            vel.vel_y = -vel.vel_y * damp;
-            combatant.remaining_bounces -= 1;
-            *state = CharacterState::BounceUp;
-        } else {
-            // Slide: y 軸速度を 0、XZ は維持して Slide で摩擦減衰させる。
+        let jump_landing = matches!(*state, CharacterState::Jump | CharacterState::JumpAttack)
+            && pos.y <= 0.0
+            // Jump 直後 (上昇中) の y <= 0 を誤検知しないよう、落下中 (vel_y <= 0) かつ
+            // 出発点を一度離れた (= 1 tick 以上経過、上昇開始した) ことを vel_y <= 0 で代用。
+            && vel.vel_y <= 0.0;
+        if knockback_landing {
+            pos.y = 0.0;
+            if combatant.remaining_bounces > 0 {
+                // Bounce: vel_y を反転して dampening、vel_x/vel_z も同 dampening。
+                // bounce_dampening=0 は YAML 上「跳ねない」の表現としても使われるので、その場合は
+                // 反転速度が 0 になり、次 tick で transition_at_apex が即 BounceDown に倒し、
+                // 同 tick の detect_landing でまた処理される (= 残数を消費しながら最終的に Slide)。
+                let damp = phys.0.bounce_dampening;
+                vel.vel_x *= damp;
+                vel.vel_z *= damp;
+                vel.vel_y = -vel.vel_y * damp;
+                combatant.remaining_bounces -= 1;
+                *state = CharacterState::BounceUp;
+            } else {
+                // Slide: y 軸速度を 0、XZ は維持して Slide で摩擦減衰させる。
+                vel.vel_y = 0.0;
+                *state = CharacterState::Slide;
+            }
+        } else if jump_landing {
+            pos.y = 0.0;
+            vel.vel_x = 0.0;
             vel.vel_y = 0.0;
-            *state = CharacterState::Slide;
+            vel.vel_z = 0.0;
+            *state = CharacterState::Idle;
         }
     }
 }
@@ -421,6 +480,7 @@ mod tests {
         let p = Physics {
             knockback_threshold: 120,
             bounce_count: 2,
+            guard_break_threshold: 80,
             ..Physics::default()
         };
         let c = Combatant::new(&p);
@@ -430,6 +490,8 @@ mod tests {
         assert_eq!(c.remaining_bounces, 2);
         assert_eq!(c.final_action, FinalAction::default());
         assert!(!c.hit_from_behind);
+        assert_eq!(c.guard_gauge, 80);
+        assert_eq!(c.guard_recovery_remaining_ticks, 0);
     }
 
     #[test]
