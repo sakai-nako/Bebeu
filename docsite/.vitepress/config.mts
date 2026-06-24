@@ -1,14 +1,19 @@
 import { defineConfig } from 'vitepress'
 
-// VitePress 設定。ローカル閲覧用 (公開デプロイなし) のユーザーマニュアル。
+// VitePress 設定。ローカル閲覧 (`vitepress dev`) と Public mirror の GitHub Pages
+// (https://sakai-nako.github.io/Bebeu/) の両用。
 // i18n 構成: root を 日本語 (ja-JP)、`/en/` を英語 (en-US) として 2 言語対応。
 // 言語切り替えは VitePress 標準の右上セレクタ + 同名パス自動リンクで動く。
+//
+// `base` は env `DOCSITE_BASE` で切り替える。ローカルは `/`、Pages 用 CI は
+// `DOCSITE_BASE=/Bebeu/` を渡す (`.github/workflows/deploy-docsite.yml`)。
 //
 // 共通設定 (search 等) は top-level themeConfig に置き、locale 個別の UI labels と
 // sidebar/nav は locales[].themeConfig で上書きする。
 export default defineConfig({
   title: 'Bebeu docs',
   description: 'editor / engine ユーザーマニュアル',
+  base: process.env.DOCSITE_BASE ?? '/',
   lastUpdated: true,
   cleanUrls: true,
 

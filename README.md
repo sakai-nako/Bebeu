@@ -89,7 +89,7 @@ just docsite-setup   # one-time: npm install
 just docsite-dev     # http://localhost:5173
 ```
 
-There is no hosted version yet. Doc sources sit directly under `docsite/` (see `index.md` and the `engine/` / `editor/` subdirs). Design decisions are recorded as ADRs under [.claude/adr/](.claude/adr/).
+The hosted version lives at **<https://sakai-nako.github.io/Bebeu/>** (deployed from `main` via `.github/workflows/deploy-docsite.yml`). Doc sources sit directly under `docsite/` (see `index.md` and the `engine/` / `editor/` subdirs). Design decisions are recorded as ADRs under [.claude/adr/](.claude/adr/).
 
 ## License
 
@@ -179,4 +179,4 @@ just docsite-setup   # 初回: npm install
 just docsite-dev     # http://localhost:5173
 ```
 
-hosting はまだ無し。ソースは `docsite/` 直下 (`index.md` と `engine/` / `editor/` サブディレクトリ)。設計判断は [.claude/adr/](.claude/adr/) の ADR として番号付きで蓄積しています。
+公開版は **<https://sakai-nako.github.io/Bebeu/>** で閲覧できます (`main` push 時に `.github/workflows/deploy-docsite.yml` 経由でデプロイ)。ソースは `docsite/` 直下 (`index.md` と `engine/` / `editor/` サブディレクトリ)。設計判断は [.claude/adr/](.claude/adr/) の ADR として番号付きで蓄積しています。
