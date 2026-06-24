@@ -22,7 +22,20 @@ frames:
   flip: null
   pivot_point_offset: null
   body_box_overrides: null
-  attack_box_overrides: null
+  attack_box_overrides:
+  - meta:
+      damage: 12
+      knockback_damage: 30
+      knockback:
+        vel_x: 30.0
+        vel_y: 0.0
+        vel_z: 0.0
+      guard_damage: 20
+      hit_stop:
+        shake_x: -3
+        shake_y: 0
+        count: 4
+        decay: 0.0
   layers:
   - index: 0
     sprite_group_number: 12

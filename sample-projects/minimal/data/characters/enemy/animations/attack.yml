@@ -13,6 +13,20 @@ frames:
     transparency: 1.0
 - index: 1
   ticks: 10
+  attack_box_overrides:
+  - meta:
+      damage: 10
+      knockback_damage: 40
+      knockback:
+        vel_x: 40.0
+        vel_y: 320.0
+        vel_z: 0.0
+      guard_damage: 30
+      hit_stop:
+        shake_x: -5
+        shake_y: 0
+        count: 5
+        decay: 0.0
   layers:
   - index: 0
     sprite_group_number: 3

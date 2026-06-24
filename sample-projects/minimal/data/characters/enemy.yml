@@ -15,3 +15,9 @@ physics:
   rise_duration_ms: 300
   max_juggle_count: 3
   max_down_hit_count: 3
+  guard_break_threshold: 100
+  guard_recovery_ms: 1200
+  guard_break_knockback:
+    vel_x: 100.0
+    vel_y: 150.0
+    vel_z: 0.0
