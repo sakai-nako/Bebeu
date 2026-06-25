@@ -18,6 +18,10 @@ pub struct Character {
     /// 既定 = `DEFAULT_CHARACTER_DEPTH` (16)。YAML 省略時はこの値にフォールバックする。
     #[serde(default = "default_character_depth")]
     pub depth: u32,
+    /// ADR-0031: HUD の `enemy_hp_bar` 等が `target: { tag: "boss" }` で参照する任意ラベル。
+    /// engine 側 Character struct と対称。Player 側には影響しない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     /// 物理パラメータ (重力 / ジャンプ初速 / Knockback ゲージ / バウンス / 摩擦 / 各種 timer)。
     /// YAML 省略時は `CharacterPhysics::default()`、各フィールドも個別に `#[serde(default)]` で
     /// 部分的省略を許す。詳細は `CharacterPhysics` を参照。

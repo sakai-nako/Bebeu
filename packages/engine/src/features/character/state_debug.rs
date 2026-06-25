@@ -285,6 +285,7 @@ mod tests {
             body_box_geoms: vec![],
             body_box_disabled: false,
             sprite_pivot: [0, 0],
+            image_dims: [0, 0],
         }
     }
 

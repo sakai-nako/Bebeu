@@ -10,6 +10,7 @@ use bevy::sprite::Anchor;
 
 use crate::entities::level::Level;
 use crate::entities::project::Project;
+use crate::shared::PlayerId;
 use crate::shared::projection;
 use crate::shared::{Action, ActionMap};
 
@@ -18,14 +19,28 @@ use super::debug_control::SimulationSet;
 use super::knockback::{KinematicVel, PhysicsParams};
 use super::state_machine::CharacterState;
 
-/// Player を 1 体だけ識別する marker component。
+/// Player を識別する component。`PlayerId` で個体を区別する (ADR-0030)。
+/// 既存の `With<Player>` filter はそのまま動き、id が必要な system は `&Player` を query する。
 #[derive(Component, Debug, Clone, Copy)]
-pub struct Player;
+pub struct Player(pub PlayerId);
 
 /// Opponent (AI / 被弾対象) を識別する marker component。
 /// `Player` と排他で、入力 system や camera follow からは除外される。
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Enemy;
+
+/// Character YAML の `tag` を持つ enemy にだけ attach される識別ラベル (ADR-0031)。
+/// HUD の `enemy_hp_bar` が `target: { tag: "boss" }` で参照する。
+/// tag が無いキャラには component 自体が無い (HUD 側は `Option<&EnemyTag>` で扱う)。
+#[derive(Component, Debug, Clone)]
+pub struct EnemyTag(pub String);
+
+/// Player が直近で engagement した Enemy entity (ADR-0031)。HUD の engagement-link
+/// 系 enemy bar が `target: { last_engaged_by: p1 }` で参照する。
+/// 現状 Phase A は Player → Enemy 方向の hit でだけ書き込まれる (Enemy → Player の
+/// 被弾はまだ未実装)。Player ごとに 1 component 持ち、初期値は `None`。
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct LastEngagedWith(pub Option<Entity>);
 
 /// battle viewport を映している Camera2d を識別する marker component。
 #[derive(Component, Debug, Clone, Copy)]

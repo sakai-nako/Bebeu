@@ -94,4 +94,35 @@ mod tests {
         assert!(Project::load_from_file(&path, "broken").is_err());
         Ok(())
     }
+
+    #[test]
+    fn sample_minimal_project_yaml_parses_with_all_hud_kinds() -> Result<()> {
+        // sample-projects/minimal の main.yml は HUD 3 種 (player_hp_bar / enemy_hp_bar /
+        // enemy_overhead_hp_bar) を含み、スキーマ変更で壊れたらここで弾く。
+        use crate::entities::project::{EnemyTarget, HudElement};
+        use crate::shared::PlayerId;
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sample-projects/minimal/data/projects/main.yml");
+        let project = Project::load_from_file(&path, "main")?;
+        assert_eq!(project.hud.elements.len(), 3);
+
+        let HudElement::PlayerHpBar(p1) = &project.hud.elements[0] else {
+            panic!("expected player_hp_bar at index 0");
+        };
+        assert_eq!(p1.id.as_deref(), Some("p1_hp"));
+        assert_eq!(p1.target, PlayerId::P1);
+
+        let HudElement::EnemyHpBar(engaged) = &project.hud.elements[1] else {
+            panic!("expected enemy_hp_bar at index 1");
+        };
+        assert_eq!(engaged.target, EnemyTarget::LastEngagedBy(PlayerId::P1));
+        let at = engaged.anchor_to.as_ref().expect("anchor_to set");
+        assert_eq!(at.id, "p1_hp");
+
+        let HudElement::EnemyOverheadHpBar(_) = &project.hud.elements[2] else {
+            panic!("expected enemy_overhead_hp_bar at index 2");
+        };
+        Ok(())
+    }
 }

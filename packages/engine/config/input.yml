@@ -22,11 +22,11 @@
 # 手で編集した場合はその内容を尊重するが、コメント以外の余計な書式はキー設定画面
 # からの save 時に整列形式に揃え直される。
 bindings:
-  move_left:   [ArrowLeft, KeyA]
-  move_right:  [ArrowRight, KeyD]
-  move_up:     [ArrowUp, KeyW]
-  move_down:   [ArrowDown, KeyS]
-  attack:      [Space, KeyJ]
-  down_attack: [KeyK]
-  jump:        [KeyI]
-  guard:       [KeyL]
+  move_left:   [KeyA]
+  move_right:  [KeyD]
+  move_up:     [KeyW]
+  move_down:   [KeyS]
+  attack:      [KeyJ]
+  down_attack: [KeyL]
+  jump:        [KeyK]
+  guard:       [KeyI]

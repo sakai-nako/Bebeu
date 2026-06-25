@@ -123,6 +123,7 @@ fn CreateCharacterModal(onclose: EventHandler<()>) -> Element {
             thumbnail_path,
             hp: DEFAULT_HP,
             depth: DEFAULT_CHARACTER_DEPTH,
+            tag: None,
             physics: CharacterPhysics::default(),
             sprite_groups,
             animations: Vec::new(),

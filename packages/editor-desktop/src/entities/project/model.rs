@@ -1,5 +1,52 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Local co-op の Player 識別子 (ADR-0030)。engine 側の `shared::PlayerId` と同じ形を
+/// editor に mirror する (ADR-0001 FSD: editor / engine は独立に同 struct を保つ)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayerId {
+    #[default]
+    P1,
+    P2,
+    P3,
+    P4,
+}
+
+impl PlayerId {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            PlayerId::P1 => "P1",
+            PlayerId::P2 => "P2",
+            PlayerId::P3 => "P3",
+            PlayerId::P4 => "P4",
+        }
+    }
+
+    #[must_use]
+    pub fn value(self) -> &'static str {
+        match self {
+            PlayerId::P1 => "p1",
+            PlayerId::P2 => "p2",
+            PlayerId::P3 => "p3",
+            PlayerId::P4 => "p4",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<PlayerId> {
+        match s {
+            "p1" => Some(PlayerId::P1),
+            "p2" => Some(PlayerId::P2),
+            "p3" => Some(PlayerId::P3),
+            "p4" => Some(PlayerId::P4),
+            _ => None,
+        }
+    }
+
+    pub const ALL: &'static [PlayerId] = &[PlayerId::P1, PlayerId::P2, PlayerId::P3, PlayerId::P4];
+}
+
 /// 論理解像度のデフォルト幅 (px)。
 const DEFAULT_RESOLUTION_WIDTH: u32 = 640;
 
@@ -39,10 +86,15 @@ pub struct Hud {
 }
 
 /// HUD 1 要素。internally-tagged enum で `kind:` が YAML 上の判別キーになる (ADR-0029)。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// `Copy` は外している (ADR-0031: id / tag が `String` を含む)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HudElement {
     PlayerHpBar(PlayerHpBarConfig),
+    PlayerHpRing(PlayerHpRingConfig),
+    EnemyHpBar(EnemyHpBarConfig),
+    /// ADR-0032: world-anchored、Enemy entity の頭上に attach される。anchor 系は無効。
+    EnemyOverheadHpBar(EnemyOverheadHpBarConfig),
 }
 
 impl HudElement {
@@ -51,6 +103,9 @@ impl HudElement {
     pub fn kind_label(&self) -> &'static str {
         match self {
             HudElement::PlayerHpBar(_) => "Player HP bar",
+            HudElement::PlayerHpRing(_) => "Player HP ring",
+            HudElement::EnemyHpBar(_) => "Enemy HP bar",
+            HudElement::EnemyOverheadHpBar(_) => "Enemy overhead HP bar",
         }
     }
 
@@ -59,16 +114,33 @@ impl HudElement {
     pub fn kind_value(&self) -> &'static str {
         match self {
             HudElement::PlayerHpBar(_) => "player_hp_bar",
+            HudElement::PlayerHpRing(_) => "player_hp_ring",
+            HudElement::EnemyHpBar(_) => "enemy_hp_bar",
+            HudElement::EnemyOverheadHpBar(_) => "enemy_overhead_hp_bar",
         }
     }
 
     /// 全 kind の一覧 (default 値付き)。「+ 要素を追加」の選択肢を生成する用途。
     #[must_use]
     pub fn all_kinds() -> &'static [HudKindOption] {
-        &[HudKindOption {
-            value: "player_hp_bar",
-            label: "Player HP bar",
-        }]
+        &[
+            HudKindOption {
+                value: "player_hp_bar",
+                label: "Player HP bar",
+            },
+            HudKindOption {
+                value: "player_hp_ring",
+                label: "Player HP ring",
+            },
+            HudKindOption {
+                value: "enemy_hp_bar",
+                label: "Enemy HP bar",
+            },
+            HudKindOption {
+                value: "enemy_overhead_hp_bar",
+                label: "Enemy overhead HP bar",
+            },
+        ]
     }
 
     /// kind 識別子から default 値の HudElement を作る。
@@ -76,15 +148,35 @@ impl HudElement {
     pub fn default_for_kind(value: &str) -> Option<Self> {
         match value {
             "player_hp_bar" => Some(Self::PlayerHpBar(PlayerHpBarConfig::default())),
+            "player_hp_ring" => Some(Self::PlayerHpRing(PlayerHpRingConfig::default())),
+            "enemy_hp_bar" => Some(Self::EnemyHpBar(EnemyHpBarConfig::default())),
+            "enemy_overhead_hp_bar" => {
+                Some(Self::EnemyOverheadHpBar(EnemyOverheadHpBarConfig::default()))
+            }
             _ => None,
         }
     }
 
-    /// 描画位置の anchor を返す。
+    /// 描画位置の anchor を返す。`anchor_to.is_some()` のときはこの値は無視される。
+    /// world-anchored (overhead) では呼び出さないこと。
     #[must_use]
     pub fn anchor(&self) -> HudAnchor {
         match self {
             HudElement::PlayerHpBar(c) => c.anchor,
+            HudElement::PlayerHpRing(c) => c.anchor,
+            HudElement::EnemyHpBar(c) => c.anchor,
+            HudElement::EnemyOverheadHpBar(_) => HudAnchor::default(),
+        }
+    }
+
+    /// 他要素を基準点に取る anchor (ADR-0031)。`Some` のとき `anchor` より優先される。
+    #[must_use]
+    pub fn anchor_to(&self) -> Option<&HudElementAnchor> {
+        match self {
+            HudElement::PlayerHpBar(c) => c.anchor_to.as_ref(),
+            HudElement::PlayerHpRing(c) => c.anchor_to.as_ref(),
+            HudElement::EnemyHpBar(c) => c.anchor_to.as_ref(),
+            HudElement::EnemyOverheadHpBar(_) => None,
         }
     }
 
@@ -93,8 +185,30 @@ impl HudElement {
     pub fn offset(&self) -> HudOffset {
         match self {
             HudElement::PlayerHpBar(c) => c.offset,
+            HudElement::PlayerHpRing(c) => c.offset,
+            HudElement::EnemyHpBar(c) => c.offset,
+            HudElement::EnemyOverheadHpBar(_) => HudOffset::default(),
         }
     }
+
+    /// 他要素から `anchor_to.id` で参照されるための識別子 (ADR-0031)。
+    #[must_use]
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            HudElement::PlayerHpBar(c) => c.id.as_deref(),
+            HudElement::PlayerHpRing(c) => c.id.as_deref(),
+            HudElement::EnemyHpBar(c) => c.id.as_deref(),
+            HudElement::EnemyOverheadHpBar(_) => None,
+        }
+    }
+}
+
+/// 他 HUD 要素を基準点に取る anchor (ADR-0031)。engine 側と対称。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HudElementAnchor {
+    pub id: String,
+    #[serde(default)]
+    pub edge: HudAnchor,
 }
 
 /// UI の dropdown 用 (value, label) ペア。
@@ -106,10 +220,18 @@ pub struct HudKindOption {
 
 /// Player HP バーの表示設定。size は外形 bbox で、frame.thickness 分だけゲージ
 /// 描画領域が内側に縮む (frame は size の内側に食い込む)。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayerHpBarConfig {
+    /// ADR-0031: 他の HUD 要素から `anchor_to.id` で参照される識別子。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub target: PlayerId,
     #[serde(default)]
     pub anchor: HudAnchor,
+    /// ADR-0031: `Some` のとき他要素を基準点に取る。`anchor` より優先される。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_to: Option<HudElementAnchor>,
     #[serde(default)]
     pub offset: HudOffset,
     pub size: HudSize,
@@ -130,7 +252,10 @@ pub struct PlayerHpBarConfig {
 impl Default for PlayerHpBarConfig {
     fn default() -> Self {
         Self {
+            id: None,
+            target: PlayerId::default(),
             anchor: HudAnchor::TopLeft,
+            anchor_to: None,
             offset: HudOffset { x: 16.0, y: 16.0 },
             size: HudSize { w: 120.0, h: 8.0 },
             frame: HudFrame::default(),
@@ -159,6 +284,301 @@ fn default_hp_bar_fg_color() -> HexColor {
         b: 38,
         a: 255,
     }
+}
+
+/// Player HP リング (annular sector) の表示設定。詳細は ADR-0029。
+///
+/// `size` は外接 bbox、半径は `min(w, h) / 2`。`start_angle` は 12 時方向 = 0°、
+/// `direction` の向きに `sweep_extent` 度ぶん描画する。`ring_thickness = 0` で扇形になる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlayerHpRingConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub target: PlayerId,
+    #[serde(default)]
+    pub anchor: HudAnchor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_to: Option<HudElementAnchor>,
+    #[serde(default)]
+    pub offset: HudOffset,
+    pub size: HudSize,
+    #[serde(default)]
+    pub frame: HudFrame,
+    #[serde(default = "default_hp_bar_bg_color")]
+    pub bg_color: HexColor,
+    #[serde(default = "default_hp_bar_fg_color")]
+    pub fg_color: HexColor,
+    #[serde(default = "default_ring_start_angle")]
+    pub start_angle: f32,
+    #[serde(default = "default_ring_sweep_extent")]
+    pub sweep_extent: f32,
+    #[serde(default = "default_ring_thickness")]
+    pub ring_thickness: f32,
+    #[serde(default)]
+    pub direction: RingDirection,
+    #[serde(default)]
+    pub gauge_step: GaugeStep,
+    #[serde(default)]
+    pub gauge_gap: f32,
+}
+
+impl Default for PlayerHpRingConfig {
+    fn default() -> Self {
+        Self {
+            id: None,
+            target: PlayerId::default(),
+            anchor: HudAnchor::TopLeft,
+            anchor_to: None,
+            offset: HudOffset { x: 16.0, y: 16.0 },
+            size: HudSize { w: 48.0, h: 48.0 },
+            frame: HudFrame::default(),
+            bg_color: default_hp_bar_bg_color(),
+            fg_color: default_hp_bar_fg_color(),
+            start_angle: default_ring_start_angle(),
+            sweep_extent: default_ring_sweep_extent(),
+            ring_thickness: default_ring_thickness(),
+            direction: RingDirection::default(),
+            gauge_step: GaugeStep::default(),
+            gauge_gap: 0.0,
+        }
+    }
+}
+
+/// Enemy HP バーの表示設定 (ADR-0031)。Phase 2 では gauge は **常に単一** (gauge_step は
+/// schema 互換性のため残しているが engine 側で FixedCount(1) として扱われる)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnemyHpBarConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub target: EnemyTarget,
+    #[serde(default)]
+    pub anchor: HudAnchor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_to: Option<HudElementAnchor>,
+    #[serde(default)]
+    pub offset: HudOffset,
+    pub size: HudSize,
+    #[serde(default)]
+    pub frame: HudFrame,
+    #[serde(default = "default_hp_bar_bg_color")]
+    pub bg_color: HexColor,
+    #[serde(default = "default_enemy_hp_bar_fg_color")]
+    pub fg_color: HexColor,
+    #[serde(default)]
+    pub fill_direction: FillDirection,
+    #[serde(default)]
+    pub gauge_step: GaugeStep,
+    #[serde(default)]
+    pub gauge_gap: f32,
+}
+
+impl Default for EnemyHpBarConfig {
+    fn default() -> Self {
+        Self {
+            id: None,
+            target: EnemyTarget::default(),
+            anchor: HudAnchor::Top,
+            anchor_to: None,
+            offset: HudOffset { x: 0.0, y: 16.0 },
+            size: HudSize { w: 120.0, h: 8.0 },
+            frame: HudFrame::default(),
+            bg_color: default_hp_bar_bg_color(),
+            fg_color: default_enemy_hp_bar_fg_color(),
+            fill_direction: FillDirection::default(),
+            gauge_step: GaugeStep::default(),
+            gauge_gap: 0.0,
+        }
+    }
+}
+
+fn default_enemy_hp_bar_fg_color() -> HexColor {
+    HexColor {
+        r: 242,
+        g: 216,
+        b: 44,
+        a: 255,
+    }
+}
+
+/// HUD の `enemy_hp_bar` 要素がどの Enemy を映すか (ADR-0031)。engine と対称。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnemyTarget {
+    LastEngagedBy(PlayerId),
+    Tag(String),
+    NthEnemy(usize),
+}
+
+impl Default for EnemyTarget {
+    fn default() -> Self {
+        Self::LastEngagedBy(PlayerId::P1)
+    }
+}
+
+/// world-anchored な Enemy 頭上 HP bar の表示設定 (ADR-0032)。engine 側 mirror。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnemyOverheadHpBarConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_filter: Option<String>,
+    pub size: HudSize,
+    #[serde(default)]
+    pub frame: HudFrame,
+    #[serde(default = "default_hp_bar_bg_color")]
+    pub bg_color: HexColor,
+    #[serde(default = "default_enemy_hp_bar_fg_color")]
+    pub fg_color: HexColor,
+    #[serde(default)]
+    pub vertical_anchor: OverheadVerticalAnchor,
+    #[serde(default = "default_overhead_offset_y")]
+    pub offset_y: f32,
+    #[serde(default)]
+    pub fill_direction: FillDirection,
+}
+
+impl Default for EnemyOverheadHpBarConfig {
+    fn default() -> Self {
+        Self {
+            tag_filter: None,
+            size: HudSize { w: 28.0, h: 3.0 },
+            frame: HudFrame::default(),
+            bg_color: default_hp_bar_bg_color(),
+            fg_color: default_enemy_hp_bar_fg_color(),
+            vertical_anchor: OverheadVerticalAnchor::default(),
+            offset_y: default_overhead_offset_y(),
+            fill_direction: FillDirection::LeftToRight,
+        }
+    }
+}
+
+fn default_overhead_offset_y() -> f32 {
+    4.0
+}
+
+/// overhead bar の Y 基準 (ADR-0032)。engine 側と対称。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverheadVerticalAnchor {
+    Origin,
+    #[default]
+    ImageTop,
+    ImageBottom,
+}
+
+impl OverheadVerticalAnchor {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            OverheadVerticalAnchor::Origin => "Origin (足元)",
+            OverheadVerticalAnchor::ImageTop => "Image top",
+            OverheadVerticalAnchor::ImageBottom => "Image bottom",
+        }
+    }
+
+    #[must_use]
+    pub fn value(self) -> &'static str {
+        match self {
+            OverheadVerticalAnchor::Origin => "origin",
+            OverheadVerticalAnchor::ImageTop => "image_top",
+            OverheadVerticalAnchor::ImageBottom => "image_bottom",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<OverheadVerticalAnchor> {
+        match s {
+            "origin" => Some(OverheadVerticalAnchor::Origin),
+            "image_top" => Some(OverheadVerticalAnchor::ImageTop),
+            "image_bottom" => Some(OverheadVerticalAnchor::ImageBottom),
+            _ => None,
+        }
+    }
+
+    pub const ALL: &'static [OverheadVerticalAnchor] = &[
+        OverheadVerticalAnchor::Origin,
+        OverheadVerticalAnchor::ImageTop,
+        OverheadVerticalAnchor::ImageBottom,
+    ];
+}
+
+impl EnemyTarget {
+    /// UI dropdown の variant 切替用識別子。
+    #[must_use]
+    pub fn value(&self) -> &'static str {
+        match self {
+            EnemyTarget::LastEngagedBy(_) => "last_engaged_by",
+            EnemyTarget::Tag(_) => "tag",
+            EnemyTarget::NthEnemy(_) => "nth_enemy",
+        }
+    }
+
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            EnemyTarget::LastEngagedBy(_) => "Last engaged by",
+            EnemyTarget::Tag(_) => "Tag",
+            EnemyTarget::NthEnemy(_) => "Nth enemy",
+        }
+    }
+
+    pub const ALL_VARIANTS: &'static [(&'static str, &'static str)] = &[
+        ("last_engaged_by", "Last engaged by"),
+        ("tag", "Tag"),
+        ("nth_enemy", "Nth enemy"),
+    ];
+}
+
+fn default_ring_start_angle() -> f32 {
+    0.0
+}
+
+fn default_ring_sweep_extent() -> f32 {
+    360.0
+}
+
+fn default_ring_thickness() -> f32 {
+    6.0
+}
+
+/// リングが描画される回転方向。`gauge_step` で複数 segment に分けたとき、終端側の
+/// segment から HP 減少で消える。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RingDirection {
+    #[default]
+    Clockwise,
+    CounterClockwise,
+}
+
+impl RingDirection {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            RingDirection::Clockwise => "Clockwise",
+            RingDirection::CounterClockwise => "Counter-clockwise",
+        }
+    }
+
+    #[must_use]
+    pub fn value(self) -> &'static str {
+        match self {
+            RingDirection::Clockwise => "clockwise",
+            RingDirection::CounterClockwise => "counter_clockwise",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<RingDirection> {
+        match s {
+            "clockwise" => Some(RingDirection::Clockwise),
+            "counter_clockwise" => Some(RingDirection::CounterClockwise),
+            _ => None,
+        }
+    }
+
+    pub const ALL: &'static [RingDirection] =
+        &[RingDirection::Clockwise, RingDirection::CounterClockwise];
 }
 
 /// 画面上の基準点。anchor から offset 分だけずらした位置に要素を置く。
@@ -491,6 +911,7 @@ impl Default for Resolution {
 
 #[cfg(test)]
 #[allow(clippy::float_cmp)] // YAML round-trip では ビット一致を期待する
+#[allow(clippy::panic)] // refutable let-else の fallback として明示的に panic させる
 mod tests {
     use super::*;
 
@@ -509,11 +930,33 @@ mod tests {
     gauge_gap: 0.0
 "##;
         let hud: Hud = serde_saphyr::from_str(yaml).expect("hud yaml parses");
-        let HudElement::PlayerHpBar(cfg) = hud.elements[0];
+        let HudElement::PlayerHpBar(cfg) = &hud.elements[0] else {
+            panic!("expected player_hp_bar");
+        };
         assert_eq!(cfg.size, HudSize { w: 120.0, h: 8.0 });
         assert_eq!(cfg.frame.thickness, 1.0);
         assert_eq!(cfg.fill_direction, FillDirection::LeftToRight);
         assert_eq!(cfg.gauge_step, GaugeStep::FixedCount(1));
+    }
+
+    #[test]
+    fn player_hp_ring_round_trips_through_yaml() {
+        let yaml = r"elements:
+  - kind: player_hp_ring
+    size: { w: 48.0, h: 48.0 }
+    start_angle: 15.0
+    sweep_extent: 330.0
+    ring_thickness: 8.0
+    direction: counter_clockwise
+";
+        let hud: Hud = serde_saphyr::from_str(yaml).expect("hud yaml parses");
+        let HudElement::PlayerHpRing(cfg) = &hud.elements[0] else {
+            panic!("expected player_hp_ring");
+        };
+        assert_eq!(cfg.start_angle, 15.0);
+        assert_eq!(cfg.sweep_extent, 330.0);
+        assert_eq!(cfg.ring_thickness, 8.0);
+        assert_eq!(cfg.direction, RingDirection::CounterClockwise);
     }
 
     #[test]
@@ -527,5 +970,91 @@ mod tests {
         let s = c.to_hex_string();
         assert_eq!(s, "#ff880080");
         assert_eq!(HexColor::parse(&s).expect("parses"), c);
+    }
+
+    #[test]
+    fn player_id_value_and_parse_round_trip() {
+        for p in PlayerId::ALL {
+            assert_eq!(PlayerId::parse(p.value()), Some(*p));
+        }
+    }
+
+    #[test]
+    fn hud_element_target_default_is_p1_and_explicit_p2_round_trips() {
+        // ADR-0030: target を省略すれば p1、明示すれば parse される。
+        let yaml = r"elements:
+  - kind: player_hp_bar
+    size: { w: 100.0, h: 8.0 }
+  - kind: player_hp_ring
+    target: p2
+    size: { w: 32.0, h: 32.0 }
+";
+        let hud: Hud = serde_saphyr::from_str(yaml).expect("hud yaml parses");
+        let HudElement::PlayerHpBar(cfg0) = &hud.elements[0] else {
+            panic!("expected player_hp_bar");
+        };
+        let HudElement::PlayerHpRing(cfg1) = &hud.elements[1] else {
+            panic!("expected player_hp_ring");
+        };
+        assert_eq!(cfg0.target, PlayerId::P1);
+        assert_eq!(cfg1.target, PlayerId::P2);
+    }
+
+    #[test]
+    fn enemy_overhead_hp_bar_round_trips_with_default_anchor_and_explicit_image_bottom() {
+        let yaml = r"elements:
+  - kind: enemy_overhead_hp_bar
+    size: { w: 28.0, h: 3.0 }
+  - kind: enemy_overhead_hp_bar
+    tag_filter: boss
+    vertical_anchor: image_bottom
+    offset_y: 8.0
+    size: { w: 64.0, h: 5.0 }
+";
+        let hud: Hud = serde_saphyr::from_str(yaml).expect("hud yaml parses");
+        let HudElement::EnemyOverheadHpBar(any) = &hud.elements[0] else {
+            panic!("expected enemy_overhead_hp_bar");
+        };
+        assert!(any.tag_filter.is_none());
+        assert_eq!(any.vertical_anchor, OverheadVerticalAnchor::ImageTop);
+        let HudElement::EnemyOverheadHpBar(boss) = &hud.elements[1] else {
+            panic!("expected enemy_overhead_hp_bar");
+        };
+        assert_eq!(boss.tag_filter.as_deref(), Some("boss"));
+        assert_eq!(boss.vertical_anchor, OverheadVerticalAnchor::ImageBottom);
+        assert_eq!(boss.offset_y, 8.0);
+    }
+
+    #[test]
+    fn overhead_vertical_anchor_round_trips_through_value_and_parse() {
+        for a in OverheadVerticalAnchor::ALL {
+            assert_eq!(OverheadVerticalAnchor::parse(a.value()), Some(*a));
+        }
+    }
+
+    #[test]
+    fn enemy_hp_bar_round_trips_with_anchor_to_and_engagement_link() {
+        // ADR-0031: editor 側でも EnemyHpBar + anchor_to + EnemyTarget が parse できる。
+        let yaml = r"elements:
+  - kind: player_hp_bar
+    id: p1_hp
+    size: { w: 120.0, h: 8.0 }
+  - kind: enemy_hp_bar
+    target:
+      last_engaged_by: p1
+    anchor_to:
+      id: p1_hp
+      edge: bottom_left
+    size: { w: 120.0, h: 6.0 }
+";
+        let hud: Hud = serde_saphyr::from_str(yaml).expect("hud yaml parses");
+        assert_eq!(hud.elements[0].id(), Some("p1_hp"));
+        let HudElement::EnemyHpBar(cfg) = &hud.elements[1] else {
+            panic!("expected enemy_hp_bar");
+        };
+        assert_eq!(cfg.target, EnemyTarget::LastEngagedBy(PlayerId::P1));
+        let at = cfg.anchor_to.as_ref().expect("anchor_to set");
+        assert_eq!(at.id, "p1_hp");
+        assert_eq!(at.edge, HudAnchor::BottomLeft);
     }
 }

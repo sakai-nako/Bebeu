@@ -243,6 +243,10 @@ pub struct Character {
     pub hp: u32,
     #[serde(default = "default_depth")]
     pub depth: u32,
+    /// ADR-0031: HUD の `enemy_hp_bar` 等が `target: { tag: "boss" }` で識別するのに使う任意ラベル。
+    /// Player には影響しない。複数キャラに同じ tag を付けたときは "最初に生成された entity" が選ばれる。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     #[serde(default)]
     pub physics: Physics,
     /// `runtime/data/characters/{name}/sprite-groups/*.yml` から populate される。

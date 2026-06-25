@@ -9,7 +9,10 @@ levels:
 - training
 hud:
   elements:
+  # P1 HP bar (画面左上)。`id: p1_hp` で後続の enemy bar から anchor 参照できるようにする。
   - kind: player_hp_bar
+    id: p1_hp
+    target: p1
     anchor: top_left
     offset:
       x: 16.0
@@ -26,3 +29,37 @@ hud:
     gauge_step:
       fixed_count: 1
     gauge_gap: 0.0
+  # ADR-0031: P1 が最後に殴った enemy の HP bar を P1 HP の真下に貼り付け。
+  # 攻撃が成立すると engagement target が切り替わって bar の中身が変わる。
+  - kind: enemy_hp_bar
+    target:
+      last_engaged_by: p1
+    anchor_to:
+      id: p1_hp
+      edge: bottom_left
+    offset:
+      x: 0.0
+      "y": 4.0
+    size:
+      w: 120.0
+      h: 6.0
+    frame:
+      thickness: 1.0
+      color: "#000000"
+    bg_color: "#00000099"
+    fg_color: "#f2d82c"
+    fill_direction: left_to_right
+  # ADR-0032: 各 enemy の頭上に追従する小さい bar。`vertical_anchor: image_top` で
+  # ジャンプ等で sprite が縦に伸びても自動で頭上に追従する。
+  - kind: enemy_overhead_hp_bar
+    size:
+      w: 28.0
+      h: 4.0
+    frame:
+      thickness: 1.0
+      color: "#000000"
+    bg_color: "#00000099"
+    fg_color: "#f2d82c"
+    vertical_anchor: image_top
+    offset_y: 4.0
+    fill_direction: left_to_right

@@ -28,7 +28,7 @@ use super::animation::{AnimationFrames, AnimationSet};
 use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
 use super::knockback::{Combatant, FinalAction, KinematicVel, PhysicsParams, ms_to_ticks};
-use super::movement::{Enemy, Facing, Player, WorldPosition};
+use super::movement::{Enemy, Facing, LastEngagedWith, Player, WorldPosition};
 use super::state_machine::{CharacterState, EnemyAnimationSet};
 
 /// player が今 attack の hit frame に居て、AttackBox が active な状態かを判定する。
@@ -385,6 +385,9 @@ fn resolve_hits(
             &AnimationFrames,
             &mut AttackHitConsumed,
             &CharacterDepth,
+            // ADR-0031: Hit が成立した瞬間に書き込む。HUD の engagement-link 系
+            // enemy_hp_bar が `target: { last_engaged_by: pX }` で参照する。
+            &mut LastEngagedWith,
         ),
         (With<Player>, Without<Enemy>),
     >,
@@ -405,7 +408,7 @@ fn resolve_hits(
     >,
     player_entity_query: Query<Entity, With<Player>>,
 ) {
-    for (pos, facing, state, anim, mut consumed, depth) in &mut player_query {
+    for (pos, facing, state, anim, mut consumed, depth, mut last_engaged) in &mut player_query {
         if !is_attack_hit_active(*state, anim) || consumed.0 {
             continue;
         }
@@ -462,7 +465,12 @@ fn resolve_hits(
             );
             match decision {
                 HitDecision::SkipEnemy => {}
-                HitDecision::BreakAttack => break,
+                HitDecision::BreakAttack => {
+                    // 1 attack 1 hit が成立。HUD の engagement-link 系がこの player を
+                    // 最後の attacker として参照できるよう、被弾 enemy を記録する。
+                    last_engaged.0 = Some(enemy_entity);
+                    break;
+                }
             }
         }
     }

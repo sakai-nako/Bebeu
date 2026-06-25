@@ -17,9 +17,11 @@ use crate::entities::level::{Level, OpponentTrigger};
 use crate::entities::project::Project;
 use crate::features::character::{
     AnimationData, AnimationFrames, AttackHitConsumed, BodyBox, CharacterDepth, CharacterState,
-    Combatant, Enemy, EnemyAnimationSet, Facing, FrameRender, HitPoints, KinematicVel, MainCamera,
-    PhysicsParams, Player, PlayerAnimationLibrary, SimulationSet, VSYNC_TICK, WorldPosition,
+    Combatant, Enemy, EnemyAnimationSet, EnemyTag, Facing, FrameRender, HitPoints, KinematicVel,
+    LastEngagedWith, MainCamera, PhysicsParams, Player, PlayerAnimationLibrary, SimulationSet,
+    VSYNC_TICK, WorldPosition,
 };
+use crate::shared::PlayerId;
 use crate::shared::config::RuntimePaths;
 use crate::shared::flip::flip_x_of;
 use crate::shared::png_header;
@@ -209,29 +211,38 @@ fn setup(
         0.0,
         level.player_spawn_z as f32,
     );
-    commands.spawn((
-        Sprite::from_image(first_handle),
-        first_anchor,
-        Transform::from_translation(player_translation),
-        AnimationFrames::new(initial.frames, initial.is_loop, initial.loop_start_index),
-        Player,
-        CharacterState::default(),
-        Facing::default(),
-        player_pos,
-        // 初期値は default で良い。`sync_body_box` が次 frame で current_body_boxes 由来の
-        // box に書き換える。Enemy 側と同じ流れ。これが無いと hitbox debug overlay にも
-        // 出ない (draw_hitboxes が BodyBox component を query するため)。
-        BodyBox::default_for_world(player_pos),
-        AttackHitConsumed::default(),
-        CharacterDepth(character.depth),
-        // 吹っ飛びフロー用 (ADR-0024 Phase A)。Phase A の player は被弾しないが、
-        // 将来の Combatant 統一に向けて attach しておく。
-        Combatant::new(&character.physics),
-        KinematicVel::default(),
-        PhysicsParams(character.physics.clone()),
-        // Player も Enemy と同様に HP を持たせる (debug overlay の HP 表示 / 将来の被弾対応)。
-        HitPoints::new(character.hp),
-    ));
+    let player_entity = commands
+        .spawn((
+            Sprite::from_image(first_handle),
+            first_anchor,
+            Transform::from_translation(player_translation),
+            AnimationFrames::new(initial.frames, initial.is_loop, initial.loop_start_index),
+            // Phase 1 (ADR-0030): MVP は P1 だけ。multi-player は将来 project.players の
+            // 順序で P1..P4 を割り振る予定。
+            Player(PlayerId::P1),
+            CharacterState::default(),
+            Facing::default(),
+            player_pos,
+            // 初期値は default で良い。`sync_body_box` が次 frame で current_body_boxes 由来の
+            // box に書き換える。Enemy 側と同じ流れ。これが無いと hitbox debug overlay にも
+            // 出ない (draw_hitboxes が BodyBox component を query するため)。
+            BodyBox::default_for_world(player_pos),
+            AttackHitConsumed::default(),
+            CharacterDepth(character.depth),
+            // 吹っ飛びフロー用 (ADR-0024 Phase A)。Phase A の player は被弾しないが、
+            // 将来の Combatant 統一に向けて attach しておく。
+            Combatant::new(&character.physics),
+            KinematicVel::default(),
+            PhysicsParams(character.physics.clone()),
+            // Player も Enemy と同様に HP を持たせる (debug overlay の HP 表示 / 将来の被弾対応)。
+            HitPoints::new(character.hp),
+        ))
+        .id();
+    // ADR-0031: engagement tracking。初期は誰とも engaged していない。bundle tuple の
+    // 15 上限を越えるので spawn 後に insert する。
+    commands
+        .entity(player_entity)
+        .insert(LastEngagedWith::default());
 
     commands.insert_resource(library);
     // movement::handle_input が areas を読めるよう Resource として注入する。
@@ -299,6 +310,7 @@ fn build_animation_frames(
             body_box_geoms: extract_body_box_geoms(frame, sprite),
             body_box_disabled: extract_body_box_disabled(frame),
             sprite_pivot: [pivot_x, pivot_y],
+            image_dims: dims,
         });
     }
 
@@ -474,28 +486,34 @@ fn spawn_opponents_on_trigger(
         trigger.spawn_y as f32,
         trigger.spawn_z as f32,
     );
-    commands.spawn((
-        Sprite::from_image(first_handle),
-        first_anchor,
-        Transform::from_translation(translation),
-        AnimationFrames::new(
-            idle_data.frames,
-            idle_data.is_loop,
-            idle_data.loop_start_index,
-        ),
-        Enemy,
-        CharacterState::default(),
-        Facing::Left,
-        enemy_pos,
-        BodyBox::default_for_world(enemy_pos),
-        HitPoints::new(character.hp),
-        CharacterDepth(character.depth),
-        anim_set,
-        // 吹っ飛びフロー用 (ADR-0024 Phase A)。被弾側として gauge / 速度 / physics を持つ。
-        Combatant::new(&character.physics),
-        KinematicVel::default(),
-        PhysicsParams(character.physics.clone()),
-    ));
+    let enemy_entity = commands
+        .spawn((
+            Sprite::from_image(first_handle),
+            first_anchor,
+            Transform::from_translation(translation),
+            AnimationFrames::new(
+                idle_data.frames,
+                idle_data.is_loop,
+                idle_data.loop_start_index,
+            ),
+            Enemy,
+            CharacterState::default(),
+            Facing::Left,
+            enemy_pos,
+            BodyBox::default_for_world(enemy_pos),
+            HitPoints::new(character.hp),
+            CharacterDepth(character.depth),
+            anim_set,
+            // 吹っ飛びフロー用 (ADR-0024 Phase A)。被弾側として gauge / 速度 / physics を持つ。
+            Combatant::new(&character.physics),
+            KinematicVel::default(),
+            PhysicsParams(character.physics.clone()),
+        ))
+        .id();
+    // ADR-0031: tag があれば HUD target { tag: ... } から参照できるよう component を attach。
+    if let Some(tag) = &character.tag {
+        commands.entity(enemy_entity).insert(EnemyTag(tag.clone()));
+    }
 }
 
 /// `character` の `role` Animation を引いて `build_animation_frames` で frame 列を作り、

@@ -28,7 +28,8 @@ pub use hit_stop::{HitStopPlugin, HitStopState};
 pub use hitbox_debug::{HitboxDebugEnabled, HitboxDebugPlugin};
 pub use knockback::{Combatant, FinalAction, KinematicVel, KnockbackPlugin, PhysicsParams};
 pub use movement::{
-    Enemy, Facing, MainCamera, MovementPlugin, Player, WorldPosition, flip_anchor, total_flip_x,
+    Enemy, EnemyTag, Facing, LastEngagedWith, MainCamera, MovementPlugin, Player, WorldPosition,
+    flip_anchor, total_flip_x,
 };
 pub use state_debug::{StateDebugEnabled, StateDebugPlugin};
 pub use state_machine::{

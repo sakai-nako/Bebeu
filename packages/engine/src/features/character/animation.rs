@@ -77,6 +77,9 @@ pub struct FrameRender {
     /// `frame.pivot_point_offset` と `layer.pivot_point_offset` を加算したもの。
     /// AttackBox / BodyBox の世界変換で「画像座標 → world 座標」の原点として使う。
     pub sprite_pivot: [i32; 2],
+    /// 画像 dimensions ([width, height], px)。HUD の overhead bar が「sprite 上端 /
+    /// 下端からの相対位置」で配置するために frame ごとに保持する (ADR-0032)。
+    pub image_dims: [u32; 2],
 }
 
 #[derive(Component)]
@@ -226,6 +229,15 @@ impl AnimationFrames {
         self.frames
             .get(self.current)
             .map_or([0, 0], |f| f.sprite_pivot)
+    }
+
+    /// 現在 frame の画像 dimensions ([w, h], px)。frames が空のときは `[0, 0]`。
+    /// HUD overhead bar が画像上端 / 下端基準で配置するときに使う (ADR-0032)。
+    #[must_use]
+    pub fn current_image_dims(&self) -> [u32; 2] {
+        self.frames
+            .get(self.current)
+            .map_or([0, 0], |f| f.image_dims)
     }
 
     /// 現在 frame で active な hit_stop 演出パラメータ (`None` で hit_stop なし)。
@@ -385,6 +397,7 @@ mod tests {
             body_box_geoms: Vec::new(),
             body_box_disabled: false,
             sprite_pivot: [0, 0],
+            image_dims: [0, 0],
         }
     }
 
