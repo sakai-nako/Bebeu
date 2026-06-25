@@ -8,13 +8,16 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 dioxus = { version = "0.7.9", features = ["desktop", "router"] }
 dirs = "6.0.0"
 http = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.17.2"
 serde.workspace = true
 serde-saphyr.workspace = true
 tracing.workspace = true
+xcap = "0.9"
 
 [dev-dependencies]
 tempfile.workspace = true

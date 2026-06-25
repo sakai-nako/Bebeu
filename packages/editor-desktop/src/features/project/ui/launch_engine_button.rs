@@ -7,10 +7,8 @@ use crate::entities::project::Project;
 /// プロセス起動は scope 外。`just engine-run --project <name>` のコマンドを表示し、
 /// ユーザーがコピーして PowerShell 等で叩く想定。Phase 2 以降で `Command::new` による
 /// 自動 spawn に拡張できる余地を残している。
-///
-/// `workspace_dir` は engine 側の `--workspace` flag に渡す絶対パス。
 #[component]
-pub fn LaunchEngineButton(project: Signal<Project>, workspace_dir: ReadSignal<String>) -> Element {
+pub fn LaunchEngineButton(project: Signal<Project>) -> Element {
     let mut show_modal = use_signal(|| false);
 
     let validation = use_memo(move || validate(&project.read()));
@@ -33,7 +31,6 @@ pub fn LaunchEngineButton(project: Signal<Project>, workspace_dir: ReadSignal<St
         if show_modal() {
             LaunchCommandModal {
                 project,
-                workspace_dir,
                 onclose: move |()| show_modal.set(false),
             }
         }
@@ -41,19 +38,11 @@ pub fn LaunchEngineButton(project: Signal<Project>, workspace_dir: ReadSignal<St
 }
 
 #[component]
-fn LaunchCommandModal(
-    project: Signal<Project>,
-    workspace_dir: ReadSignal<String>,
-    onclose: EventHandler<()>,
-) -> Element {
+fn LaunchCommandModal(project: Signal<Project>, onclose: EventHandler<()>) -> Element {
     let project_name = project.read().name.clone();
-    let workspace = workspace_dir();
 
     let just_command = format!("just engine-run -- --project {project_name}");
-    let raw_command =
-        format!("go run ./cmd/beatemup --workspace \"{workspace}\" --project {project_name}");
     let copy_just = just_command.clone();
-    let copy_raw = raw_command.clone();
 
     rsx! {
         dialog { class: "modal modal-open",
@@ -61,28 +50,14 @@ fn LaunchCommandModal(
                 h3 { class: "text-lg font-bold mb-4", "engine 起動コマンド" }
 
                 p { class: "text-sm text-base-content/70 mb-3",
-                    "以下のコマンドを PowerShell / シェルで実行すると engine が Project '{project_name}' で起動します。"
+                    "以下のコマンドをリポジトリルートで実行すると engine が Project '{project_name}' で起動します。"
                 }
 
-                div { class: "space-y-3",
-                    div {
-                        p { class: "text-xs font-bold mb-1", "リポジトリルートで実行:" }
-                        div { class: "flex gap-2 items-start",
-                            code { class: "flex-1 bg-base-200 p-2 rounded text-xs break-all",
-                                "{just_command}"
-                            }
-                            CopyButton { text: copy_just }
-                        }
+                div { class: "flex gap-2 items-start",
+                    code { class: "flex-1 bg-base-200 p-2 rounded text-xs break-all",
+                        "{just_command}"
                     }
-                    div {
-                        p { class: "text-xs font-bold mb-1", "packages/engine/ で直接実行:" }
-                        div { class: "flex gap-2 items-start",
-                            code { class: "flex-1 bg-base-200 p-2 rounded text-xs break-all",
-                                "{raw_command}"
-                            }
-                            CopyButton { text: copy_raw }
-                        }
-                    }
+                    CopyButton { text: copy_just }
                 }
 
                 div { class: "modal-action",
@@ -159,6 +134,7 @@ mod tests {
             players: players.iter().copied().map(String::from).collect(),
             opponents: opponents.iter().copied().map(String::from).collect(),
             levels: levels.iter().copied().map(String::from).collect(),
+            ..Project::default()
         }
     }
 

@@ -35,3 +35,7 @@ pub use wav_header::{WavInfo, parse_wav_info, read_wav_info};
 
 mod png_header;
 pub use png_header::{parse_png_dimensions, read_png_dimensions};
+
+pub mod color_hsv;
+
+pub mod screen_capture;

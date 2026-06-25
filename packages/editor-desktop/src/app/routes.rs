@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use super::characters_layout::CharactersLayout;
 use super::levels_layout::LevelsLayout;
+use super::projects_layout::ProjectsLayout;
 use super::root_shell::RootShell;
 use crate::pages::{
     AnimationEditorPage, CharacterDetailPage, CharactersIndex, LevelDetailPage, LevelsIndex,
@@ -38,9 +39,10 @@ pub enum Routes {
             LevelDetailPage { name: String },
         #[end_layout]
 
-        #[route("/projects")]
-        ProjectsIndex {},
+        #[layout(ProjectsLayout)]
+            #[route("/projects")]
+            ProjectsIndex {},
 
-        #[route("/projects/:name")]
-        ProjectDetailPage { name: String },
+            #[route("/projects/:name")]
+            ProjectDetailPage { name: String },
 }

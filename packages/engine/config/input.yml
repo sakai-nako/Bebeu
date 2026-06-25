@@ -1,0 +1,32 @@
+# Engine の gameplay 入力バインド (ADR-0016)。
+#
+# このファイルが置き場の規定 path:
+#   env BEATEMUP_INPUT_CONFIG > packages/engine/config/input.yml
+#
+# fail-soft: ファイル不在やパース失敗時は内部のハードコード default に落ちる
+# (`packages/engine/src/shared/input.rs` の `ActionMap::default`)。
+#
+# 未知の action 名や KeyCode 名は warn を出して skip される。yml に書かれなかった
+# action は default のバインドがそのまま残る。空 vec ([]) は「この action を unbind
+# したい」を表現する (= 入力を完全に無効化)。
+#
+# サポートする KeyCode 名 (Bevy `KeyCode` の variant 名にそのまま揃える):
+#   - 英字: KeyA - KeyZ
+#   - 数字: Digit0 - Digit9
+#   - 矢印: ArrowLeft / ArrowRight / ArrowUp / ArrowDown
+#   - F1 - F12
+#   - 修飾: ShiftLeft / ShiftRight / ControlLeft / ControlRight / AltLeft / AltRight
+#   - 特殊: Space / Enter / Escape / Tab / Backspace / Delete
+#
+# このファイルはキーコンフィグ画面 (Options scene) の Back 確定で自動上書きされる。
+# 手で編集した場合はその内容を尊重するが、コメント以外の余計な書式はキー設定画面
+# からの save 時に整列形式に揃え直される。
+bindings:
+  move_left:   [ArrowLeft, KeyA]
+  move_right:  [ArrowRight, KeyD]
+  move_up:     [ArrowUp, KeyW]
+  move_down:   [ArrowDown, KeyS]
+  attack:      [Space, KeyJ]
+  down_attack: [KeyK]
+  jump:        [KeyI]
+  guard:       [KeyL]

@@ -3,6 +3,7 @@ mod asset_handler;
 mod characters_layout;
 mod entrypoint;
 mod levels_layout;
+mod projects_layout;
 mod root_shell;
 mod routes;
 

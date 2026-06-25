@@ -195,11 +195,11 @@ fn end_oneshot_actions(
             CharacterState::Attack | CharacterState::Hit | CharacterState::DownAttack => {
                 *state = CharacterState::Idle;
             }
-            CharacterState::JumpAttack => {
-                if pos.y > 0.0 {
-                    *state = CharacterState::Jump;
-                }
-                // pos.y <= 0 (着地済み) のときは detect_landing が Idle へ遷移させる。
+            // JumpAttack: pos.y > 0 (空中) のときだけ Jump に戻す。pos.y <= 0 (着地済み)
+            // は detect_landing が Idle に遷移させるので、ここでは match guard で除外し
+            // 自然に `_` arm へ流して何もしない。
+            CharacterState::JumpAttack if pos.y > 0.0 => {
+                *state = CharacterState::Jump;
             }
             _ => {}
         }
@@ -234,20 +234,17 @@ where
     let dead = final_action == FinalAction::Dead;
     let back = hit_from_behind;
 
-    if dead && back {
-        if let Some(data) = dead_back_variant(base).and_then(&get) {
-            return Some(data);
-        }
+    if dead
+        && back
+        && let Some(data) = dead_back_variant(base).and_then(&get)
+    {
+        return Some(data);
     }
-    if dead {
-        if let Some(data) = dead_variant(base).and_then(&get) {
-            return Some(data);
-        }
+    if dead && let Some(data) = dead_variant(base).and_then(&get) {
+        return Some(data);
     }
-    if back {
-        if let Some(data) = back_variant(base).and_then(&get) {
-            return Some(data);
-        }
+    if back && let Some(data) = back_variant(base).and_then(&get) {
+        return Some(data);
     }
     if let Some(data) = get(base) {
         return Some(data);

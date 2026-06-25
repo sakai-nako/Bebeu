@@ -7,3 +7,22 @@ opponents:
 - enemy
 levels:
 - training
+hud:
+  elements:
+  - kind: player_hp_bar
+    anchor: top_left
+    offset:
+      x: 16.0
+      "y": 16.0
+    size:
+      w: 120.0
+      h: 8.0
+    frame:
+      thickness: 1.0
+      color: "#000000"
+    bg_color: "#00000099"
+    fg_color: "#e62626"
+    fill_direction: left_to_right
+    gauge_step:
+      fixed_count: 1
+    gauge_gap: 0.0

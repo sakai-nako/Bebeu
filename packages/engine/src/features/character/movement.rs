@@ -11,6 +11,7 @@ use bevy::sprite::Anchor;
 use crate::entities::level::Level;
 use crate::entities::project::Project;
 use crate::shared::projection;
+use crate::shared::{Action, ActionMap};
 
 use super::animation::{AnimationFrames, AnimationSet, VSYNC_TICK_SECS};
 use super::debug_control::SimulationSet;
@@ -93,6 +94,7 @@ impl Plugin for MovementPlugin {
 
 fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
+    action_map: Res<ActionMap>,
     level: Option<Res<Level>>,
     mut query: Query<
         (
@@ -112,25 +114,25 @@ fn handle_input(
 
     let mut dx = 0.0;
     let mut dz = 0.0;
-    if keys.pressed(KeyCode::ArrowRight) || keys.pressed(KeyCode::KeyD) {
+    if action_map.pressed(&keys, Action::MoveRight) {
         dx += step;
     }
-    if keys.pressed(KeyCode::ArrowLeft) || keys.pressed(KeyCode::KeyA) {
+    if action_map.pressed(&keys, Action::MoveLeft) {
         dx -= step;
     }
-    if keys.pressed(KeyCode::ArrowDown) || keys.pressed(KeyCode::KeyS) {
+    if action_map.pressed(&keys, Action::MoveDown) {
         dz += step;
     }
-    if keys.pressed(KeyCode::ArrowUp) || keys.pressed(KeyCode::KeyW) {
+    if action_map.pressed(&keys, Action::MoveUp) {
         dz -= step;
     }
-    let attack_pressed = keys.just_pressed(KeyCode::Space) || keys.just_pressed(KeyCode::KeyJ);
-    // 下段攻撃 (倒れた敵向けの低位置 AttackBox)。`K` キー。
-    let down_attack_pressed = keys.just_pressed(KeyCode::KeyK);
-    // ジャンプ (ADR-0027): `I` キー、地上 (pos.y == 0) でのみ受付。
-    let jump_pressed = keys.just_pressed(KeyCode::KeyI);
-    // ガード (ADR-0028): `L` キー押下中だけ維持。離すと Idle に戻る (Guard 経路で処理)。
-    let guard_pressed = keys.pressed(KeyCode::KeyL);
+    let attack_pressed = action_map.just_pressed(&keys, Action::Attack);
+    // 下段攻撃 (倒れた敵向けの低位置 AttackBox)。
+    let down_attack_pressed = action_map.just_pressed(&keys, Action::DownAttack);
+    // ジャンプ (ADR-0027)、地上 (pos.y == 0) でのみ受付。
+    let jump_pressed = action_map.just_pressed(&keys, Action::Jump);
+    // ガード (ADR-0028): 押下中だけ維持。離すと Idle に戻る (Guard 経路で処理)。
+    let guard_pressed = action_map.pressed(&keys, Action::Guard);
     let move_target_state = if dx == 0.0 && dz == 0.0 {
         CharacterState::Idle
     } else {

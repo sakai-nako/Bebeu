@@ -139,7 +139,7 @@ fn update_labels(
         if !enabled.0 {
             continue;
         }
-        text.0 = format_label(state, anim, combatant, phys, hp);
+        text.0 = format_label(*state, anim, combatant, phys, hp);
         // 頭上 (足元 +90 px) を scene world で計算 → main camera 基準にして viewport
         // 中心相対座標 → window scale を掛けて FinalPassCamera world 座標へ。
         let scene_world =
@@ -182,7 +182,7 @@ fn viewport_to_window_scale(config: &PixelPerfectConfig) -> f32 {
 /// `t=` (state 経過総 tick) は単独の積算値なので 0-indexed のまま。
 /// 空 animation / duration 0 frame は分子 = 0 で出す (例外的に `0/0` を許容)。
 fn format_label(
-    state: &CharacterState,
+    state: CharacterState,
     anim: &AnimationFrames,
     combatant: &Combatant,
     phys: &PhysicsParams,
@@ -261,7 +261,7 @@ mod tests {
             current: 30,
             max: 60,
         };
-        let s = format_label(&state, &anim, &combatant, &phys, Some(&hp));
+        let s = format_label(state, &anim, &combatant, &phys, Some(&hp));
         assert!(s.contains("KnockbackUp"), "state: {s}");
         assert!(s.contains("t=0"), "state elapsed: {s}");
         // empty animation → 0/0 (edge case allowed)
@@ -293,7 +293,7 @@ mod tests {
         // 5 frames、`current_index()=0` → 表示は `f=1/5` (最終 frame で `f=5/5`)。
         let anim = AnimationFrames::new(vec![dummy_frame_render(100); 5], false, 0);
         let s = format_label(
-            &CharacterState::Idle,
+            CharacterState::Idle,
             &anim,
             &dummy_combatant(),
             &dummy_physics(),
@@ -311,7 +311,7 @@ mod tests {
         // 単体テスト済み。
         let anim = AnimationFrames::new(vec![dummy_frame_render(100); 1], false, 0);
         let s = format_label(
-            &CharacterState::Idle,
+            CharacterState::Idle,
             &anim,
             &dummy_combatant(),
             &dummy_physics(),
@@ -359,7 +359,7 @@ mod tests {
         combatant.hit_from_behind = true;
         combatant.gauge = -5;
         combatant.remaining_bounces = 0;
-        let s = format_label(&state, &anim, &combatant, &dummy_physics(), None);
+        let s = format_label(state, &anim, &combatant, &dummy_physics(), None);
         assert!(s.contains("FA=Dead"));
         assert!(s.contains("HFB=true"));
         assert!(s.contains("G=-5/"));

@@ -59,6 +59,7 @@ fn CreateProjectModal(onclose: EventHandler<()>) -> Element {
                 players: Vec::new(),
                 opponents: Vec::new(),
                 levels: Vec::new(),
+                ..Project::default()
             };
             match repo.create(&new_proj) {
                 Ok(()) => {

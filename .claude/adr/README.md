@@ -41,8 +41,9 @@ ADR は前身リポジトリ `local-game-workspace` (Go + ebitengine engine, Rus
 | 0026 | [pixel-perfect 拡大を中間 render texture で分離する (window は yml 駆動)](0026-pixel-perfect-via-intermediate-render-target.md) | Accepted |
 | 0027 | [ジャンプと空中攻撃を独立 State として導入し、Knockback と Y 軸物理を共有する](0027-jump-and-aerial-combat.md) | Accepted |
 | 0028 | [Guard を gauge 1 本で表現し、GuardBreak は Knockback フローに合流させる](0028-guard-gauge-and-guard-break.md) | Accepted |
+| 0029 | [HUD レイアウトは Project YAML に持つ](0029-hud-layout-in-project-yaml.md) | Accepted |
 
 ## 書き方
 
-新しい ADR は次の番号 (`0029-` から) を使い、テンプレートは ADR-0001 を参考にしてください。
+新しい ADR は次の番号 (`0030-` から) を使い、テンプレートは ADR-0001 を参考にしてください。
 Status は Accepted / Superseded by ADR-XXXX / Refined by ADR-XXXX / Deprecated のいずれか。

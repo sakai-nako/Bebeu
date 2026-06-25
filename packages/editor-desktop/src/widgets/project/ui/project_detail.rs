@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use crate::entities::character::{Character, CharacterRepository};
 use crate::entities::level::LevelRepository;
 use crate::entities::project::{Project, ProjectRepository, use_projects_refresh};
+use crate::features::hud::EditHudLayout;
 use crate::features::project::{
     DeleteProjectButton, EditProjectResolution, LaunchEngineButton, ProjectRole,
     ProjectRoleSelector,
@@ -12,10 +13,7 @@ use crate::features::project::{
 
 /// URL の :name で指定された Project の詳細編集ページ。
 #[component]
-pub fn ProjectDetail(
-    target_name: ReadSignal<String>,
-    workspace_dir: ReadSignal<String>,
-) -> Element {
+pub fn ProjectDetail(target_name: ReadSignal<String>) -> Element {
     let repo = use_context::<Arc<dyn ProjectRepository>>();
     let refresh = use_projects_refresh();
     let nav = use_navigator();
@@ -45,22 +43,17 @@ pub fn ProjectDetail(
     };
 
     rsx! {
-        div { class: "max-w-3xl mx-auto p-6 space-y-6",
-            div { class: "flex items-center justify-between",
-                div {
-                    button {
-                        r#type: "button",
-                        class: "link link-hover text-sm text-base-content/60 mb-1",
-                        onclick: move |_| {
-                            nav.push("/projects".to_string());
-                        },
-                        "← Projects 一覧へ"
-                    }
-                    h1 { class: "text-2xl font-bold", "Project: {target_name}" }
+        div { class: "space-y-6",
+            div { class: "breadcrumbs text-sm",
+                ul {
+                    li { "projects" }
+                    li { "{target_name}" }
                 }
-                div { class: "flex gap-2",
-                    DeleteProjectButton { target: target_signal, ondeleted: on_deleted }
-                }
+            }
+
+            div { class: "flex items-center gap-3",
+                h1 { class: "text-3xl font-bold", "{target_name}" }
+                DeleteProjectButton { target: target_signal, ondeleted: on_deleted }
             }
 
             if let Some(message) = load_error() {
@@ -70,7 +63,7 @@ pub fn ProjectDetail(
             }
 
             if loaded() {
-                ProjectEditForm { project: current_project, workspace_dir }
+                ProjectEditForm { project: current_project }
             } else if load_error().is_none() {
                 div { class: "loading loading-spinner" }
             }
@@ -80,7 +73,7 @@ pub fn ProjectDetail(
 
 /// Project 1 つに対する編集フォーム本体。
 #[component]
-fn ProjectEditForm(project: Signal<Project>, workspace_dir: ReadSignal<String>) -> Element {
+fn ProjectEditForm(project: Signal<Project>) -> Element {
     let character_repo = use_context::<Arc<dyn CharacterRepository>>();
     let level_repo = use_context::<Arc<dyn LevelRepository>>();
     let mut character_names = use_signal(Vec::<String>::new);
@@ -154,11 +147,17 @@ fn ProjectEditForm(project: Signal<Project>, workspace_dir: ReadSignal<String>) 
 
         section { class: "card bg-base-100 shadow-sm",
             div { class: "card-body",
+                EditHudLayout { project }
+            }
+        }
+
+        section { class: "card bg-base-100 shadow-sm",
+            div { class: "card-body",
                 h2 { class: "card-title text-base", "engine 起動" }
                 p { class: "text-sm text-base-content/70 mb-2",
                     "この Project を指定して engine を起動します。実際のプロセス起動は手動で行ってください。"
                 }
-                LaunchEngineButton { project, workspace_dir }
+                LaunchEngineButton { project }
             }
         }
     }

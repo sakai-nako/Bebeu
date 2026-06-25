@@ -7,11 +7,14 @@
 //!   `WorldPosition` に dt 積分する (dt = 60Hz 固定)。
 //! - [`PhysicsParams`] は `Character.physics` を entity に持たせる wrapper。
 //! - 物理ステージ遷移:
-//!     KnockbackUp →(apex)→ KnockbackDown →(着地)→
-//!       remaining_bounces>0: BounceUp →(apex)→ BounceDown →(着地)→ (再度判定)
-//!       remaining_bounces=0: Slide →(摩擦で停止)→ LieDown →
-//!         FinalAction=LieDown: →(timer)→ Rise →(timer)→ Idle (gauge / bounce / FinalAction reset)
-//!         FinalAction=Dead:    永続停止 (= KO 演出、ADR-0025)
+//!
+//!   ```text
+//!   KnockbackUp →(apex)→ KnockbackDown →(着地)→
+//!     remaining_bounces>0: BounceUp →(apex)→ BounceDown →(着地)→ (再度判定)
+//!     remaining_bounces=0: Slide →(摩擦で停止)→ LieDown →
+//!       FinalAction=LieDown: →(timer)→ Rise →(timer)→ Idle (gauge / bounce / FinalAction reset)
+//!       FinalAction=Dead:    永続停止 (= KO 演出、ADR-0025)
+//!   ```
 //!
 //! Phase C 以降の予定:
 //! - HitFromBehind 判定と Animation 4 段フォールバック (ADR-0025)

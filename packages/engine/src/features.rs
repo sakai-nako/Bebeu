@@ -4,3 +4,4 @@
 //! 技術名 (animation / movement / state_machine) は slice 内のファイル分割に
 //! とどめ、slice 名にはしない。
 pub mod character;
+pub mod hud;

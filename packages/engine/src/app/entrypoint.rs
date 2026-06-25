@@ -17,7 +17,9 @@ use crate::features::character::{
     AnimationPlugin, AttackPlugin, DebugControlPlugin, HitStopPlugin, HitboxDebugPlugin,
     KnockbackPlugin, MovementPlugin, StateDebugPlugin, StateMachinePlugin,
 };
-use crate::scenes::{battle, result, title};
+use crate::features::hud::HudPlugin;
+use crate::scenes::{battle, options, result, title};
+use crate::shared::ActionMap;
 use crate::shared::config::{EngineConfig, RuntimePaths, WindowConfig};
 
 /// 既定のログフィルタ。`RUST_LOG` が設定されていればそちらが優先される (Bevy `LogPlugin` 仕様)。
@@ -40,10 +42,16 @@ pub struct RunOptions {
 }
 
 /// 旧 `Game.Scene` の役割を Bevy [`States`] で表現する。
+///
+/// 遷移 (Phase 3):
+/// - `Title` ↔ `Options` (タイトルメニューからの設定画面、Cancel で戻る)
+/// - `Title` → `Battle` (Start 選択)
+/// - `Battle` → `Result` (既存、勝敗時)
 #[derive(States, Debug, Clone, Eq, PartialEq, Hash, Default)]
 pub enum SceneState {
     #[default]
     Title,
+    Options,
     Battle,
     Result,
 }
@@ -74,6 +82,7 @@ pub fn entrypoint() -> Result<()> {
 /// 戻り値は `&mut App` で chain 可能。
 pub fn register_engine_plugins(app: &mut App) -> &mut App {
     app.init_state::<SceneState>()
+        .init_resource::<ActionMap>()
         .add_plugins(AnimationPlugin)
         .add_plugins(MovementPlugin)
         .add_plugins(StateMachinePlugin)
@@ -83,8 +92,10 @@ pub fn register_engine_plugins(app: &mut App) -> &mut App {
         .add_plugins(HitboxDebugPlugin)
         .add_plugins(StateDebugPlugin)
         .add_plugins(DebugControlPlugin)
+        .add_plugins(HudPlugin)
         .add_plugins(PixelPerfectRenderPlugin)
         .add_plugins(title::TitleScenePlugin)
+        .add_plugins(options::OptionsScenePlugin)
         .add_plugins(battle::BattleScenePlugin)
         .add_plugins(result::ResultScenePlugin)
 }
@@ -172,6 +183,10 @@ pub fn run(opts: RunOptions) -> Result<()> {
     )
     .insert_resource(pixel_perfect_config);
     register_engine_plugins(&mut app);
+
+    // ActionMap は smoke test では register_engine_plugins の init_resource (Default) で十分。
+    // 本番 run では yml override (env > manifest/config/input.yml) を上に被せる。
+    app.insert_resource(ActionMap::load());
 
     if let Some(project) = project {
         app.insert_resource(project);

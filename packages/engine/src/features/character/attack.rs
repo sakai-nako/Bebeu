@@ -12,6 +12,7 @@
 //!     - gauge が枯れた (`<= 0`)
 //!     - 空中被弾 (pos.y > 0)
 //!     - 致命傷 (HP=0, Phase B)
+//!
 //!   発動時は `KinematicVel` に Facing 反転 + attenuation 済みの knockback ベクトルを
 //!   充填し、`remaining_bounces` / `gauge` を初期値に reset。致命傷なら `final_action=Dead`
 //!   を立てて [`super::knockback::advance_stage_timer`] が LieDown で永続停止させる。
@@ -362,6 +363,15 @@ fn decide_hit(
 /// hit_stop は **通常 Hit 経路のみ** で適用する (knockback 発動時は hit_stop 無しで即遷移)。
 /// 既に死亡 (HP=0) している enemy は AABB チェック前に skip し、二重 hit を防ぐ。
 /// 1 attack で同 enemy を複数回叩かないよう、最初のヒットで [`AttackHitConsumed`] を立てる。
+/// enemy 1 体に対する hit 処理の結果。呼び出し元は outer loop の流れ (continue / break) を
+/// この返り値で判定する。
+enum HitDecision {
+    /// AABB が当たらない or cap 到達 / 死亡 enemy 等で hit させない。次の enemy へ。
+    SkipEnemy,
+    /// 1 hit を成立させた。同 frame で他の enemy には当てない (= 1 attack 1 hit)。
+    BreakAttack,
+}
+
 fn resolve_hits(
     mut commands: Commands,
     // Player / Enemy が同 entity に同時に attach されることは無い前提だが、Bevy の static
@@ -418,6 +428,7 @@ fn resolve_hits(
                 ))
             },
         );
+        let player_entity = player_entity_query.single().ok();
         for (
             enemy_entity,
             body,
@@ -431,191 +442,237 @@ fn resolve_hits(
             mut vel,
         ) in &mut enemy_query
         {
-            // 既に死亡している enemy は AABB チェックすら不要。攻撃判定の二重発火と、
-            // KO 演出 (LieDown 永続停止) 中の再被弾を両方避ける。
-            if hp.is_dead() {
-                continue;
-            }
-            if !aabb_intersects(&attack_box, body) {
-                continue;
-            }
-            // 永久パターン回避: cap 到達中の敵は「完全無敵」(damage / state / gauge / consumed
-            // 全てスキップ)。`continue` で次の enemy に進むので、同 swing 内で並んでいる
-            // 後ろの非 cap 敵には引き続き当たる (= 無敵敵を「素通り」して別の敵を当てに行ける)。
-            // decide_hit の前に判定するのは、decide_hit が gauge を副作用で削るため
-            // (= 無敵敵には gauge も触らせない)。致命傷も cap 中は通さない (= 倒れたまま
-            // 完全無敵フェーズ、再 KO 演出は走らない)。
-            let already_airborne = matches!(
-                *enemy_state,
-                CharacterState::KnockbackUp
-                    | CharacterState::KnockbackDown
-                    | CharacterState::BounceUp
-                    | CharacterState::BounceDown
+            let decision = try_apply_attack_to_enemy(
+                &mut commands,
+                &meta,
+                &attack_box,
+                *facing,
+                player_entity,
+                enemy_entity,
+                body,
+                enemy_pos.y,
+                *enemy_facing,
+                &mut hp,
+                &mut enemy_state,
+                enemy_anims,
+                &mut combatant,
+                phys,
+                &mut vel,
+                &mut consumed,
             );
-            let is_down = matches!(
-                *enemy_state,
-                CharacterState::Slide | CharacterState::LieDown | CharacterState::Rise
-            );
-            if already_airborne && combatant.juggle_count >= phys.0.max_juggle_count {
-                tracing::debug!(
-                    enemy = ?enemy_entity,
-                    juggle_count = combatant.juggle_count,
-                    "attack: juggle cap reached, hit nullified",
-                );
-                continue;
+            match decision {
+                HitDecision::SkipEnemy => {}
+                HitDecision::BreakAttack => break,
             }
-            if is_down && combatant.down_hit_count >= phys.0.max_down_hit_count {
-                tracing::debug!(
-                    enemy = ?enemy_entity,
-                    down_hit_count = combatant.down_hit_count,
-                    "attack: down_hit cap reached, hit nullified",
-                );
-                continue;
-            }
-            // ADR-0028: Guard 中の被弾は damage / knockback_gauge を無傷化し、guard_gauge だけ
-            // を `guard_damage` で削る。`guard_gauge <= 0` で GuardBreak に遷移し、
-            // `KinematicVel` に `physics.guard_break_knockback` を Facing 反転して充填する。
-            // 次フレームで `advance_guard_break` が KnockbackUp に書き換えて ADR-0024 の
-            // 吹っ飛びフローに合流する (= 既存の Bounce / Slide / LieDown / Rise を再利用)。
-            if matches!(*enemy_state, CharacterState::Guard) {
-                consumed.0 = true;
-                let att = attenuation(phys.0.knockback_resistance);
-                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-                let guard_damage = (f32::from(u16::try_from(meta.guard_damage).unwrap_or(u16::MAX))
-                    * att)
-                    .round() as i32;
-                combatant.guard_gauge = combatant.guard_gauge.saturating_sub(guard_damage);
-                combatant.guard_recovery_remaining_ticks = ms_to_ticks(phys.0.guard_recovery_ms);
-                tracing::info!(
-                    enemy = ?enemy_entity,
-                    guard_damage,
-                    guard_gauge = combatant.guard_gauge,
-                    "attack: guarded",
-                );
-                if combatant.guard_gauge <= 0 {
-                    // GuardBreak 発動: guard_break_knockback を Facing 反転して KinematicVel に
-                    // 充填、Combatant の knockback 系 runtime state をリセット。state を
-                    // GuardBreak に倒し、advance_guard_break が次 frame で KnockbackUp に変える。
-                    let kb = effective_knockback(phys.0.guard_break_knockback, *facing, att);
-                    vel.vel_x = kb.vel_x;
-                    vel.vel_y = kb.vel_y;
-                    vel.vel_z = kb.vel_z;
-                    combatant.gauge = i32::try_from(phys.0.knockback_threshold).unwrap_or(i32::MAX);
-                    combatant.gauge_recovery_remaining_ticks = 0;
-                    combatant.remaining_bounces = phys.0.bounce_count;
-                    combatant.final_action = FinalAction::LieDown;
-                    combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, *enemy_facing);
-                    combatant.guard_gauge =
-                        i32::try_from(phys.0.guard_break_threshold).unwrap_or(i32::MAX);
-                    combatant.guard_recovery_remaining_ticks = 0;
-                    *enemy_state = CharacterState::GuardBreak;
-                    tracing::info!(
-                        enemy = ?enemy_entity,
-                        vel_x = kb.vel_x, vel_y = kb.vel_y,
-                        "attack: guard broken",
-                    );
-                }
-                break; // Guard 中の hit も 1 attack 1 hit を維持
-            }
-            consumed.0 = true;
-            let outcome = decide_hit(&meta, *facing, enemy_pos.y, &mut combatant, phys);
-            hp.damage(outcome.damage);
-            let lethal = hp.is_dead();
-            tracing::info!(
-                enemy = ?enemy_entity,
-                damage = outcome.damage,
-                remaining = hp.current,
-                gauge = combatant.gauge,
-                lethal,
-                "attack: hit",
-            );
-            // 致命傷は decide_hit の判定 (gauge / 空中) を上書きして必ず knockback 発動。
-            let knockback = outcome.knockback.or_else(|| {
-                lethal.then(|| {
-                    effective_knockback(
-                        meta.knockback,
-                        *facing,
-                        attenuation(phys.0.knockback_resistance),
-                    )
-                })
-            });
-            if let Some(kb) = knockback {
-                // 吹っ飛び発動: KinematicVel に充填、state を KnockbackUp に、gauge と
-                // remaining_bounces を初期値に reset。lethal なら final_action=Dead を立て、
-                // advance_stage_timer が LieDown 到達時に永続停止させる。
-                // hit_from_behind は victim Facing と kb.vel_x の関係から判定 (ADR-0025):
-                // 被弾者が自分の前方に飛ぶ = 背中側を押された。
-                // knockback 経路では hit_stop を適用しない (Phase A の簡略化を維持)。
-                vel.vel_x = kb.vel_x;
-                vel.vel_y = kb.vel_y;
-                vel.vel_z = kb.vel_z;
-                combatant.gauge = i32::try_from(phys.0.knockback_threshold).unwrap_or(i32::MAX);
-                combatant.gauge_recovery_remaining_ticks = 0;
-                combatant.remaining_bounces = phys.0.bounce_count;
-                combatant.final_action = if lethal {
-                    FinalAction::Dead
-                } else {
-                    FinalAction::LieDown
-                };
-                combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, *enemy_facing);
-                if already_airborne {
-                    combatant.juggle_count = combatant.juggle_count.saturating_add(1);
-                }
-                *enemy_state = CharacterState::KnockbackUp;
-                tracing::info!(
-                    enemy = ?enemy_entity,
-                    vel_x = kb.vel_x, vel_y = kb.vel_y, vel_z = kb.vel_z,
-                    final_action = ?combatant.final_action,
-                    hit_from_behind = combatant.hit_from_behind,
-                    juggle_count = combatant.juggle_count,
-                    "attack: knockback triggered",
-                );
-            } else {
-                // 通常 Hit (のけぞり): gauge_recovery_remaining_ticks を立てて、間隔を空ければ
-                // 自然回復する。hit_stop は attack 側 meta.hit_stop の指定通りに発動。
-                // **Down 中 (Slide / LieDown / Rise) の被弾は地上 hit ポーズ用に DownHit に
-                // 遷移**: 通常の Hit (立ちポーズ前提) を地面に伏せた状態で使うのは不自然。
-                // (cap 到達 down_hit はそもそも上で continue されているので、ここに来た時点で
-                // count はまだ余裕がある。)
-                if is_down {
-                    *enemy_state = CharacterState::DownHit;
-                    combatant.down_hit_count = combatant.down_hit_count.saturating_add(1);
-                } else {
-                    *enemy_state = CharacterState::Hit;
-                }
-                combatant.gauge_recovery_remaining_ticks = ms_to_ticks(phys.0.hit_recovery_ms);
-                if let Some(hs) = meta.hit_stop {
-                    let fallback_ms = enemy_anims
-                        .get(Role::Hit)
-                        .and_then(|data| data.frames.first())
-                        .map(|f| u32::try_from(f.duration.as_millis()).unwrap_or(u32::MAX));
-                    if let Some(duration_ms) = hs.duration_ms.or(fallback_ms) {
-                        commands.entity(enemy_entity).insert(HitStopState::victim(
-                            duration_ms,
-                            hs.shake_x,
-                            hs.shake_y,
-                            hs.count,
-                            hs.decay,
-                        ));
-                        if let Ok(player_entity) = player_entity_query.single() {
-                            commands
-                                .entity(player_entity)
-                                .insert(HitStopState::attacker(duration_ms));
-                        }
-                        tracing::info!(
-                            duration_ms,
-                            shake_x = hs.shake_x,
-                            shake_y = hs.shake_y,
-                            count = hs.count,
-                            decay = hs.decay,
-                            "attack: hit_stop applied",
-                        );
-                    }
-                }
-            }
-            break; // 1 attack 1 hit: 同 frame で他の enemy には当てない
         }
     }
+}
+
+/// `resolve_hits` の inner loop body。enemy 1 体について「AABB → cap → Guard / 通常 hit」を
+/// 順に処理し、流れの制御を [`HitDecision`] で呼び出し元に返す。
+///
+/// 引数が多いのは ECS の Query から取り出した個別 component をそのまま受けるため
+/// (struct 化すると lifetime / borrow が煩雑になる)。意味の単位はコメントの段で区切る。
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn try_apply_attack_to_enemy(
+    commands: &mut Commands,
+    meta: &AttackBoxMeta,
+    attack_box: &AttackBox,
+    player_facing: Facing,
+    player_entity: Option<Entity>,
+    enemy_entity: Entity,
+    body: &BodyBox,
+    enemy_pos_y: f32,
+    enemy_facing: Facing,
+    hp: &mut HitPoints,
+    enemy_state: &mut CharacterState,
+    enemy_anims: &EnemyAnimationSet,
+    combatant: &mut Combatant,
+    phys: &PhysicsParams,
+    vel: &mut KinematicVel,
+    consumed: &mut AttackHitConsumed,
+) -> HitDecision {
+    // 既に死亡している enemy は AABB チェックすら不要。攻撃判定の二重発火と、
+    // KO 演出 (LieDown 永続停止) 中の再被弾を両方避ける。
+    if hp.is_dead() {
+        return HitDecision::SkipEnemy;
+    }
+    if !aabb_intersects(attack_box, body) {
+        return HitDecision::SkipEnemy;
+    }
+    // 永久パターン回避: cap 到達中の敵は「完全無敵」(damage / state / gauge / consumed
+    // 全てスキップ)。`SkipEnemy` で次の enemy に進むので、同 swing 内で並んでいる
+    // 後ろの非 cap 敵には引き続き当たる (= 無敵敵を「素通り」して別の敵を当てに行ける)。
+    // decide_hit の前に判定するのは、decide_hit が gauge を副作用で削るため
+    // (= 無敵敵には gauge も触らせない)。致命傷も cap 中は通さない (= 倒れたまま
+    // 完全無敵フェーズ、再 KO 演出は走らない)。
+    let already_airborne = matches!(
+        *enemy_state,
+        CharacterState::KnockbackUp
+            | CharacterState::KnockbackDown
+            | CharacterState::BounceUp
+            | CharacterState::BounceDown
+    );
+    let is_down = matches!(
+        *enemy_state,
+        CharacterState::Slide | CharacterState::LieDown | CharacterState::Rise
+    );
+    if already_airborne && combatant.juggle_count >= phys.0.max_juggle_count {
+        tracing::debug!(
+            enemy = ?enemy_entity,
+            juggle_count = combatant.juggle_count,
+            "attack: juggle cap reached, hit nullified",
+        );
+        return HitDecision::SkipEnemy;
+    }
+    if is_down && combatant.down_hit_count >= phys.0.max_down_hit_count {
+        tracing::debug!(
+            enemy = ?enemy_entity,
+            down_hit_count = combatant.down_hit_count,
+            "attack: down_hit cap reached, hit nullified",
+        );
+        return HitDecision::SkipEnemy;
+    }
+    // ADR-0028: Guard 中の被弾は damage / knockback_gauge を無傷化し、guard_gauge だけ
+    // を `guard_damage` で削る。`guard_gauge <= 0` で GuardBreak に遷移し、
+    // `KinematicVel` に `physics.guard_break_knockback` を Facing 反転して充填する。
+    // 次フレームで `advance_guard_break` が KnockbackUp に書き換えて ADR-0024 の
+    // 吹っ飛びフローに合流する (= 既存の Bounce / Slide / LieDown / Rise を再利用)。
+    if matches!(*enemy_state, CharacterState::Guard) {
+        consumed.0 = true;
+        let att = attenuation(phys.0.knockback_resistance);
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let guard_damage =
+            (f32::from(u16::try_from(meta.guard_damage).unwrap_or(u16::MAX)) * att).round() as i32;
+        combatant.guard_gauge = combatant.guard_gauge.saturating_sub(guard_damage);
+        combatant.guard_recovery_remaining_ticks = ms_to_ticks(phys.0.guard_recovery_ms);
+        tracing::info!(
+            enemy = ?enemy_entity,
+            guard_damage,
+            guard_gauge = combatant.guard_gauge,
+            "attack: guarded",
+        );
+        if combatant.guard_gauge <= 0 {
+            // GuardBreak 発動: guard_break_knockback を Facing 反転して KinematicVel に
+            // 充填、Combatant の knockback 系 runtime state をリセット。state を
+            // GuardBreak に倒し、advance_guard_break が次 frame で KnockbackUp に変える。
+            let kb = effective_knockback(phys.0.guard_break_knockback, player_facing, att);
+            vel.vel_x = kb.vel_x;
+            vel.vel_y = kb.vel_y;
+            vel.vel_z = kb.vel_z;
+            combatant.gauge = i32::try_from(phys.0.knockback_threshold).unwrap_or(i32::MAX);
+            combatant.gauge_recovery_remaining_ticks = 0;
+            combatant.remaining_bounces = phys.0.bounce_count;
+            combatant.final_action = FinalAction::LieDown;
+            combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, enemy_facing);
+            combatant.guard_gauge = i32::try_from(phys.0.guard_break_threshold).unwrap_or(i32::MAX);
+            combatant.guard_recovery_remaining_ticks = 0;
+            *enemy_state = CharacterState::GuardBreak;
+            tracing::info!(
+                enemy = ?enemy_entity,
+                vel_x = kb.vel_x, vel_y = kb.vel_y,
+                "attack: guard broken",
+            );
+        }
+        return HitDecision::BreakAttack;
+    }
+    consumed.0 = true;
+    let outcome = decide_hit(meta, player_facing, enemy_pos_y, combatant, phys);
+    hp.damage(outcome.damage);
+    let lethal = hp.is_dead();
+    tracing::info!(
+        enemy = ?enemy_entity,
+        damage = outcome.damage,
+        remaining = hp.current,
+        gauge = combatant.gauge,
+        lethal,
+        "attack: hit",
+    );
+    // 致命傷は decide_hit の判定 (gauge / 空中) を上書きして必ず knockback 発動。
+    let knockback = outcome.knockback.or_else(|| {
+        lethal.then(|| {
+            effective_knockback(
+                meta.knockback,
+                player_facing,
+                attenuation(phys.0.knockback_resistance),
+            )
+        })
+    });
+    if let Some(kb) = knockback {
+        // 吹っ飛び発動: KinematicVel に充填、state を KnockbackUp に、gauge と
+        // remaining_bounces を初期値に reset。lethal なら final_action=Dead を立て、
+        // advance_stage_timer が LieDown 到達時に永続停止させる。
+        // hit_from_behind は victim Facing と kb.vel_x の関係から判定 (ADR-0025):
+        // 被弾者が自分の前方に飛ぶ = 背中側を押された。
+        // knockback 経路では hit_stop を適用しない (Phase A の簡略化を維持)。
+        vel.vel_x = kb.vel_x;
+        vel.vel_y = kb.vel_y;
+        vel.vel_z = kb.vel_z;
+        combatant.gauge = i32::try_from(phys.0.knockback_threshold).unwrap_or(i32::MAX);
+        combatant.gauge_recovery_remaining_ticks = 0;
+        combatant.remaining_bounces = phys.0.bounce_count;
+        combatant.final_action = if lethal {
+            FinalAction::Dead
+        } else {
+            FinalAction::LieDown
+        };
+        combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, enemy_facing);
+        if already_airborne {
+            combatant.juggle_count = combatant.juggle_count.saturating_add(1);
+        }
+        *enemy_state = CharacterState::KnockbackUp;
+        tracing::info!(
+            enemy = ?enemy_entity,
+            vel_x = kb.vel_x, vel_y = kb.vel_y, vel_z = kb.vel_z,
+            final_action = ?combatant.final_action,
+            hit_from_behind = combatant.hit_from_behind,
+            juggle_count = combatant.juggle_count,
+            "attack: knockback triggered",
+        );
+    } else {
+        // 通常 Hit (のけぞり): gauge_recovery_remaining_ticks を立てて、間隔を空ければ
+        // 自然回復する。hit_stop は attack 側 meta.hit_stop の指定通りに発動。
+        // **Down 中 (Slide / LieDown / Rise) の被弾は地上 hit ポーズ用に DownHit に
+        // 遷移**: 通常の Hit (立ちポーズ前提) を地面に伏せた状態で使うのは不自然。
+        // (cap 到達 down_hit はそもそも上で SkipEnemy されているので、ここに来た時点で
+        // count はまだ余裕がある。)
+        if is_down {
+            *enemy_state = CharacterState::DownHit;
+            combatant.down_hit_count = combatant.down_hit_count.saturating_add(1);
+        } else {
+            *enemy_state = CharacterState::Hit;
+        }
+        combatant.gauge_recovery_remaining_ticks = ms_to_ticks(phys.0.hit_recovery_ms);
+        if let Some(hs) = meta.hit_stop {
+            let fallback_ms = enemy_anims
+                .get(Role::Hit)
+                .and_then(|data| data.frames.first())
+                .map(|f| u32::try_from(f.duration.as_millis()).unwrap_or(u32::MAX));
+            if let Some(duration_ms) = hs.duration_ms.or(fallback_ms) {
+                commands.entity(enemy_entity).insert(HitStopState::victim(
+                    duration_ms,
+                    hs.shake_x,
+                    hs.shake_y,
+                    hs.count,
+                    hs.decay,
+                ));
+                if let Some(player_entity) = player_entity {
+                    commands
+                        .entity(player_entity)
+                        .insert(HitStopState::attacker(duration_ms));
+                }
+                tracing::info!(
+                    duration_ms,
+                    shake_x = hs.shake_x,
+                    shake_y = hs.shake_y,
+                    count = hs.count,
+                    decay = hs.decay,
+                    "attack: hit_stop applied",
+                );
+            }
+        }
+    }
+    HitDecision::BreakAttack
 }
 
 #[cfg(test)]

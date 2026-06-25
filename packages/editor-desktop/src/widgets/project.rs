@@ -1,2 +1,2 @@
 mod ui;
-pub use ui::{ProjectDetail, ProjectList};
+pub use ui::{ProjectDetail, ProjectsSidebar};

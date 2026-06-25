@@ -226,6 +226,7 @@ mod tests {
             players: vec!["MooR_01".to_string()],
             opponents: vec!["MooR_02".to_string()],
             levels: vec!["ct".to_string()],
+            ..Project::default()
         }
     }
 

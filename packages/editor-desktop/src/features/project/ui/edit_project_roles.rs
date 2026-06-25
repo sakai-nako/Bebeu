@@ -133,6 +133,7 @@ mod tests {
             players: players.iter().copied().map(String::from).collect(),
             opponents: opponents.iter().copied().map(String::from).collect(),
             levels: levels.iter().copied().map(String::from).collect(),
+            ..Project::default()
         }
     }
 

@@ -1,5 +1,8 @@
 mod model;
-pub use model::{Project, Resolution};
+pub use model::{
+    FillDirection, GaugeStep, HexColor, Hud, HudAnchor, HudElement, HudFrame, HudKindOption,
+    HudOffset, HudSize, PlayerHpBarConfig, Project, Resolution,
+};
 
 mod api;
 pub use api::{FilesystemProjectRepository, InMemoryProjectRepository, ProjectRepository};
