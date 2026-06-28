@@ -7,7 +7,7 @@ just engine-run                  # alias: en-run         # debug
 just engine-run-release          # alias: en-run-rel     # release
 ```
 
-Under the hood: `cargo run -p engine --bin beatemup` (with `--release` for the release build).
+Under the hood: `cargo run -p bebeu-engine --bin bebeu-engine` (with `--release` for the release build).
 
 ## Run with the sample project
 
@@ -34,4 +34,4 @@ The `--project=<name>` flag (or `--project <name>`) selects `<workspace_dir>/dat
 just engine-build                # alias: en-build
 ```
 
-Runs `cargo build --release` and then copies `target/release/beatemup(.exe)` into `runtime/build/`.
+Runs `cargo build --release` and then copies `target/release/bebeu-engine(.exe)` into `runtime/build/`.

@@ -50,3 +50,7 @@ Two caps prevent runaway combos:
 - `Physics.max_down_hit_count` — maximum number of DownHit re-hits. Behaves the same way for downed targets.
 
 When the `guard_gauge` is drained to zero while guarding, a **GuardBreak** fires: `Physics.guard_break_knockback` is loaded into the kinematic velocity and the target merges into the `KnockbackUp` flow (ADR-0028).
+
+## HUD overlay
+
+During the Battle scene the engine draws HP bars / rings / enemy HP bars according to the Project YAML's `hud:` section. See [editor / HUD layout](../editor/hud.md) for the element kinds and placement schema. A Project without a `hud:` section shows no HUD (treated as an empty HUD).

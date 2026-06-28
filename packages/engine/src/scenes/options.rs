@@ -156,7 +156,7 @@ fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
     commands.spawn((
         Text2d::new("Key Config"),
         TextFont {
-            font_size: HEADING_FONT_SIZE,
+            font_size: FontSize::Px(HEADING_FONT_SIZE),
             ..default()
         },
         TextColor(HEADING_COLOR),
@@ -172,7 +172,7 @@ fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
         commands.spawn((
             Text2d::new(action.as_snake_case()),
             TextFont {
-                font_size: ROW_FONT_SIZE,
+                font_size: FontSize::Px(ROW_FONT_SIZE),
                 ..default()
             },
             TextColor(COLOR_NORMAL),
@@ -186,7 +186,7 @@ fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
         commands.spawn((
             Text2d::new(format_bindings(&action_map, action)),
             TextFont {
-                font_size: ROW_FONT_SIZE,
+                font_size: FontSize::Px(ROW_FONT_SIZE),
                 ..default()
             },
             TextColor(COLOR_NORMAL),
@@ -204,7 +204,7 @@ fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
     commands.spawn((
         Text2d::new("Reset to default"),
         TextFont {
-            font_size: ROW_FONT_SIZE,
+            font_size: FontSize::Px(ROW_FONT_SIZE),
             ..default()
         },
         TextColor(COLOR_NORMAL),
@@ -218,7 +218,7 @@ fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
     commands.spawn((
         Text2d::new("Back (save & return)"),
         TextFont {
-            font_size: ROW_FONT_SIZE,
+            font_size: FontSize::Px(ROW_FONT_SIZE),
             ..default()
         },
         TextColor(COLOR_NORMAL),
@@ -232,7 +232,7 @@ fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
     commands.spawn((
         Text2d::new("Press any key to bind, Esc to cancel"),
         TextFont {
-            font_size: PROMPT_FONT_SIZE,
+            font_size: FontSize::Px(PROMPT_FONT_SIZE),
             ..default()
         },
         TextColor(COLOR_EDITING),

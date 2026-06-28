@@ -1,8 +1,10 @@
 # engine
 
-Bevy で作られたランタイム (`beatemup` バイナリ)。editor で作成した Project（`<workspace_dir>/data/projects/{name}.yml`）を読み込んで動作する。
+Bevy で作られたランタイム (`bebeu-engine` バイナリ)。editor で作成した Project（`<workspace_dir>/data/projects/{name}.yml`）を読み込んで動作する。
 
 workspace dir は `BEATEMUP_RUNTIME_DIR` 環境変数で指定する。未設定時は `packages/engine/../../runtime` を見るので、最初に試すときは `just engine-run-sample` で `sample-projects/minimal` を渡すのが手早い。
+
+Battle scene には Project YAML の `hud:` セクションに従って HUD (HP バー / リング / 敵 HP バー) が表示される。配置とスキーマは [editor / HUD レイアウト](../editor/hud.md) を参照。
 
 ## 構成
 

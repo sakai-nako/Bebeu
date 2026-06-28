@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use super::model::{Animation, Character, SpriteGroup};
+use super::model::{Animation, Character, SoundGroup, SpriteGroup};
 use crate::shared::config::RuntimePaths;
 
 impl Character {
@@ -21,8 +21,8 @@ impl Character {
     }
 
     /// `runtime/data/characters/{name}.yml` を本体としてロードし、
-    /// `{name}/sprite-groups/*.yml` と `{name}/animations/*.yml` を walk して
-    /// `sprite_groups` / `animations` を populate する。
+    /// `{name}/sprite-groups/*.yml` / `{name}/animations/*.yml` / `{name}/sound-groups/*.yml`
+    /// を walk して `sprite_groups` / `animations` / `sound_groups` を populate する (ADR-0019)。
     ///
     /// サブディレクトリが存在しない場合は空のままにする (warn ログを期待する場面では呼出側で判定)。
     pub fn load_directory(runtime: &RuntimePaths, name: &str) -> Result<Self> {
@@ -30,6 +30,7 @@ impl Character {
         let dir = runtime.character_dir(name);
         character.sprite_groups = load_sprite_groups_in_dir(&dir.join("sprite-groups"))?;
         character.animations = load_animations_in_dir(&dir.join("animations"))?;
+        character.sound_groups = load_sound_groups_in_dir(&dir.join("sound-groups"))?;
         Ok(character)
     }
 }
@@ -56,6 +57,17 @@ impl SpriteGroup {
     }
 }
 
+impl SoundGroup {
+    pub fn load_from_file(path: &Path, name: &str) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("sound-group YAML を読めない: {}", path.display()))?;
+        let mut group: Self = serde_saphyr::from_str(&text)
+            .with_context(|| format!("sound-group YAML をパースできない: {}", path.display()))?;
+        name.clone_into(&mut group.name);
+        Ok(group)
+    }
+}
+
 fn load_sprite_groups_in_dir(dir: &Path) -> Result<HashMap<u32, SpriteGroup>> {
     if !dir.is_dir() {
         return Ok(HashMap::new());
@@ -71,6 +83,26 @@ fn load_sprite_groups_in_dir(dir: &Path) -> Result<HashMap<u32, SpriteGroup>> {
         }
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let group = SpriteGroup::load_from_file(&path, stem)?;
+        groups.insert(group.number, group);
+    }
+    Ok(groups)
+}
+
+fn load_sound_groups_in_dir(dir: &Path) -> Result<HashMap<u32, SoundGroup>> {
+    if !dir.is_dir() {
+        return Ok(HashMap::new());
+    }
+    let mut groups = HashMap::new();
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("sound-groups ディレクトリを読めない: {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("yml") {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let group = SoundGroup::load_from_file(&path, stem)?;
         groups.insert(group.number, group);
     }
     Ok(groups)
@@ -235,6 +267,37 @@ mod tests {
         let character = Character::load_directory(&runtime, "Bare")?;
         assert!(character.sprite_groups.is_empty());
         assert!(character.animations.is_empty());
+        assert!(character.sound_groups.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn load_directory_populates_sound_groups() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let runtime = RuntimePaths::from_root(dir.path().to_path_buf());
+
+        write_file(
+            &runtime.character_file("Hero"),
+            "name: Hero\nhp: 100\ndepth: 16\n",
+        )?;
+        write_file(
+            &runtime.character_dir("Hero").join("sound-groups/pain.yml"),
+            "number: 1\nsounds:\n- index: 0\n  path: pain_a.wav\n  volume: 0.8\n- index: 1\n  path: pain_b.wav\n  volume: 0.8\n  weight: 2.0\n",
+        )?;
+        write_file(
+            &runtime.character_dir("Hero").join("sound-groups/swing.yml"),
+            "number: 2\nsounds:\n- index: 0\n  path: swing.wav\n  volume: 1.0\n",
+        )?;
+
+        let character = Character::load_directory(&runtime, "Hero")?;
+        assert_eq!(character.sound_groups.len(), 2);
+        let pain = character.find_sound_group(1).expect("group 1");
+        assert_eq!(pain.name, "pain");
+        assert_eq!(pain.sounds.len(), 2);
+        assert_eq!(pain.sounds[0].path, "pain_a.wav");
+        assert!((pain.sounds[1].weight - 2.0).abs() < f32::EPSILON);
+        let swing = character.find_sound_group(2).expect("group 2");
+        assert_eq!(swing.name, "swing");
         Ok(())
     }
 

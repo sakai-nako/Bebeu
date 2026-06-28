@@ -1,0 +1,36 @@
+name: ally
+thumbnail_path: sprite-groups/thumbnail/sprites/001.png
+hp: 100
+depth: 16
+physics:
+  gravity: 800.0
+  jump_velocity_y: 200.0
+  knockback_threshold: 100
+  knockback_resistance: 0.0
+  bounce_count: 1
+  bounce_dampening: 0.5
+  ground_friction: 600.0
+  hit_recovery_ms: 1500
+  lie_down_duration_ms: 800
+  rise_duration_ms: 300
+  max_juggle_count: 3
+  max_down_hit_count: 3
+  guard_break_threshold: 100
+  guard_recovery_ms: 1200
+  guard_break_knockback:
+    vel_x: 100.0
+    vel_y: 150.0
+    vel_z: 0.0
+# ADR-0035 Phase 2: 味方 NPC AI Brain。Player follow + 最も近い Enemy への近接 engagement。
+# Chase / Attack 系は MeleeConfig::default() と同等値 (= enemy.yml の melee と同調律)。
+ai:
+  kind: ally
+  follow_distance_min_px: 40.0
+  follow_distance_max_px: 80.0
+  chase_enter_range_px: 200.0
+  chase_exit_range_px: 240.0
+  attack_enter_range_px: 28.0
+  attack_exit_range_px: 36.0
+  attack_cooldown_ticks: 60
+  decision_interval_ticks: 6
+  min_dwell_ticks: 8

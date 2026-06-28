@@ -2,6 +2,8 @@
 //!
 //! bin からは [`entrypoint`] を呼べばよい。`entrypoint` が `--project=<name>` /
 //! `BEATEMUP_PROJECT` を解釈し、[`run`] に [`RunOptions`] を渡す。
+//! どちらも未指定なら convention の `"main"` を default として採用する
+//! (実在しなければ `Project::load_from_file` が warn で fail-soft する)。
 use std::env;
 
 use anyhow::Result;
@@ -14,8 +16,8 @@ use bevy::window::WindowResolution;
 use super::pixel_perfect::{PixelPerfectConfig, PixelPerfectRenderPlugin};
 use crate::entities::project::Project;
 use crate::features::character::{
-    AnimationPlugin, AttackPlugin, DebugControlPlugin, HitStopPlugin, HitboxDebugPlugin,
-    KnockbackPlugin, MovementPlugin, StateDebugPlugin, StateMachinePlugin,
+    AiPlugin, AnimationPlugin, AttackPlugin, DebugControlPlugin, HitStopPlugin, HitboxDebugPlugin,
+    KnockbackPlugin, MovementPlugin, SoundPlugin, StateDebugPlugin, StateMachinePlugin,
 };
 use crate::features::hud::HudPlugin;
 use crate::scenes::{battle, options, result, title};
@@ -38,6 +40,7 @@ const FALLBACK_VIEWPORT: (u32, u32) = (384, 216);
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     /// 起動時にロードする Project 名 (`data/projects/{name}.yml`)。
+    /// `entrypoint()` 経由なら未指定時に `"main"` が入る (convention)。
     pub project_name: Option<String>,
 }
 
@@ -72,6 +75,11 @@ pub fn entrypoint() -> Result<()> {
     if project_name.is_none() {
         project_name = env::var("BEATEMUP_PROJECT").ok().filter(|s| !s.is_empty());
     }
+    // `data/projects/main.yml` を default convention とする。`runtime/` と
+    // `sample-projects/minimal/` のいずれもこの名前なので、`just engine-run` /
+    // `just engine-run-sample` を引数なしで叩いても project が読まれる。
+    // 実在しない workspace では `run` 内の `Project::load_from_file` が warn で fail-soft する。
+    let project_name = project_name.or_else(|| Some("main".to_owned()));
     run(RunOptions { project_name })
 }
 
@@ -84,9 +92,11 @@ pub fn register_engine_plugins(app: &mut App) -> &mut App {
     app.init_state::<SceneState>()
         .init_resource::<ActionMap>()
         .add_plugins(AnimationPlugin)
+        .add_plugins(AiPlugin)
         .add_plugins(MovementPlugin)
         .add_plugins(StateMachinePlugin)
         .add_plugins(AttackPlugin)
+        .add_plugins(SoundPlugin)
         .add_plugins(HitStopPlugin)
         .add_plugins(KnockbackPlugin)
         .add_plugins(HitboxDebugPlugin)
@@ -160,7 +170,7 @@ pub fn run(opts: RunOptions) -> Result<()> {
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "beatemup".into(),
+                    title: "Bebeu".into(),
                     // 物理 pixel で固定 + scale_factor_override(1.0) で OS DPI スケーリングを
                     // 無視し、yml と実際の window サイズを 1:1 に保証する。
                     resolution: WindowResolution::new(win_w, win_h).with_scale_factor_override(1.0),

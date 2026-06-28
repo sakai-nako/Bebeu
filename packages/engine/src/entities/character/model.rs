@@ -1,8 +1,9 @@
 //! Character 集約の全型定義 (FSD: model segment)。
 //!
-//! editor-desktop の同名スライスとは独立で、engine 描画に必要なフィールドのみを保持する。
-//! editor 専用フィールド (`body_box_overrides` / `attack_box_overrides` / `sound` /
-//! `export_number`) は serde の未知フィールドとして silently ignore される。
+//! editor-desktop の同名スライスとは独立で、engine 描画・再生に必要なフィールドのみを保持する。
+//! editor 専用フィールド (`body_box_overrides` / `attack_box_overrides` / `export_number`) は
+//! serde の未知フィールドとして silently ignore される。
+//! ADR-0019 の Frame.sound と SoundGroup はこちらに保持する (engine 側で SE 再生する責務)。
 //! ロード処理は隣の [`super::api`] に分離している。
 use std::collections::HashMap;
 
@@ -36,6 +37,24 @@ pub const DEFAULT_MAX_JUGGLE_COUNT: u32 = 3;
 /// **完全無敵** (damage / state / gauge / consumed 全て不発) で素通りする (= 倒れたまま無敵、
 /// 永久パターン回避)。
 pub const DEFAULT_MAX_DOWN_HIT_COUNT: u32 = 3;
+
+// === AI (ADR-0035) ===
+
+/// `MeleeConfig` の default 値群。ADR-0035 の grunt YAML サンプルと同値で、Phase 1.1 で
+/// `features/character/ai.rs` に hard-code していたものを entities に移植したもの。
+pub const DEFAULT_AI_CHASE_ENTER_RANGE_PX: f32 = 200.0;
+pub const DEFAULT_AI_CHASE_EXIT_RANGE_PX: f32 = 240.0;
+pub const DEFAULT_AI_ATTACK_ENTER_RANGE_PX: f32 = 28.0;
+pub const DEFAULT_AI_ATTACK_EXIT_RANGE_PX: f32 = 36.0;
+pub const DEFAULT_AI_ATTACK_COOLDOWN_TICKS: u32 = 60;
+pub const DEFAULT_AI_DECISION_INTERVAL_TICKS: u32 = 6;
+pub const DEFAULT_AI_MIN_DWELL_TICKS: u32 = 8;
+
+/// `AllyConfig` の Follow 系 default 値 (ADR-0035 Phase 2)。Player との距離が
+/// `follow_distance_max` を超えたら Follow を再開し、`follow_distance_min` 未満で停止する。
+/// hysteresis 幅は AI の 1 decision 周期で進む距離より十分大きく取り、境界振動を避ける。
+pub const DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX: f32 = 40.0;
+pub const DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX: f32 = 80.0;
 
 // === Role ===
 
@@ -228,6 +247,198 @@ impl Default for Physics {
     }
 }
 
+// === AiConfig (ADR-0035) ===
+
+/// Character YAML の `ai:` セクション。`kind` で AI Brain の種類を切り替える
+/// internally-tagged enum (ADR-0035)。Phase 1 は `Melee` のみ、Phase 2 で `Ally` (味方 NPC)
+/// を追加、Phase 4 (ADR-0038) で `Bot` (Player 自動化) を YAML 化。将来 `Ranged` 等を増やす。
+/// Hero character は `ai: null` (= 未指定) で `Controller::Human` の手動操作を維持し、
+/// `ai: kind: bot` を書くと `Controller::Ai` の自動化に切り替える。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AiConfig {
+    Melee(MeleeConfig),
+    /// ADR-0035 Phase 2: 味方 NPC 用 Brain。Player に追従しつつ、検出範囲内の Enemy を
+    /// 殴りに行く。target 選定は「最も近い Enemy 優先、不在時は Player follow」。
+    Ally(AllyConfig),
+    /// ADR-0035 Phase 3 / ADR-0038 Phase 4: Player 自動化 Brain。env var
+    /// `BEATEMUP_PLAYER_BOT` の YAML 版で、Hero character YAML に `ai: kind: bot` を書くと
+    /// `Controller::Ai` + `BotBrain` で spawn される。env var が指定されている場合は env var
+    /// 優先 (= 既存挙動の回帰なし、ADR-0035 Phase 3 補追の規約を維持)。
+    Bot(BotConfig),
+}
+
+/// Brain が毎 tick で **次 target を選ぶ戦略** (ADR-0039)。各 Brain (Melee/Ally/Bot) の Config に
+/// 1 つずつ持たせ、`select_target` helper が enum 値に応じてディスパッチする。
+///
+/// - `Nearest`: 候補集合の中で **距離最小** を選ぶ (Phase 1.1 から既存の hardcode 動作)。
+/// - `LastEngaged`: 前回 tick で engage した target が生存 + side 一致 なら **継続追跡**。
+///   ロスト時は `Nearest` にフォールバック (= ADR-0035 Phase 2 補追で浮上した Ally の継続追跡要望
+///   への解)。
+/// - `Random` / `WeightedByThreat`: variant 定義 + stub。tick 時に該当 selector が呼ばれたら
+///   warn を 1 回だけ吐いて `Nearest` フォールバックする (= YAML 互換性を将来までキープ)。
+///   実装は実需 (Random demo / ボス級 hate 管理) が出た時点で別 ADR + Issue で行う。
+///
+/// 既存 YAML が `selector` 未指定でも default = `Nearest` で挙動 bit-exact 互換。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetSelector {
+    #[default]
+    Nearest,
+    LastEngaged,
+    Random,
+    WeightedByThreat,
+}
+
+/// Idle/Chase/Attack の FSM 遷移と Brain tick 周期に関する共通パラメータ (ADR-0039)。
+/// `MeleeConfig` / `AllyConfig` / `BotConfig` の 3 Brain で同形の field 群を 1 サブ構造に集約し、
+/// `#[serde(flatten)]` で各 BrainConfig の YAML 表現に展開する (= YAML 上は flat field のまま、
+/// Rust 側は `cfg.engagement.*` で参照する)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EngagementConfig {
+    /// Chase に入る距離。`chase_enter < chase_exit` で hysteresis を作る。
+    #[serde(default = "default_ai_chase_enter_range_px")]
+    pub chase_enter_range_px: f32,
+    /// Chase から Idle に戻る距離。
+    #[serde(default = "default_ai_chase_exit_range_px")]
+    pub chase_exit_range_px: f32,
+    /// Attack 発火距離。`attack_enter < attack_exit` で hysteresis を作る。
+    #[serde(default = "default_ai_attack_enter_range_px")]
+    pub attack_enter_range_px: f32,
+    /// Attack から Chase に戻る距離。
+    #[serde(default = "default_ai_attack_exit_range_px")]
+    pub attack_exit_range_px: f32,
+    /// 攻撃発火後の cooldown (この間 Brain は `attack: false` を返す)。
+    #[serde(default = "default_ai_attack_cooldown_ticks")]
+    pub attack_cooldown_ticks: u32,
+    /// N frame ごとに decision を回す。1 = 毎 frame。
+    #[serde(default = "default_ai_decision_interval_ticks")]
+    pub decision_interval_ticks: u32,
+    /// state 遷移後の最低滞在 tick (チャタリング防止 軸 2)。
+    #[serde(default = "default_ai_min_dwell_ticks")]
+    pub min_dwell_ticks: u32,
+}
+
+impl Default for EngagementConfig {
+    fn default() -> Self {
+        Self {
+            chase_enter_range_px: DEFAULT_AI_CHASE_ENTER_RANGE_PX,
+            chase_exit_range_px: DEFAULT_AI_CHASE_EXIT_RANGE_PX,
+            attack_enter_range_px: DEFAULT_AI_ATTACK_ENTER_RANGE_PX,
+            attack_exit_range_px: DEFAULT_AI_ATTACK_EXIT_RANGE_PX,
+            attack_cooldown_ticks: DEFAULT_AI_ATTACK_COOLDOWN_TICKS,
+            decision_interval_ticks: DEFAULT_AI_DECISION_INTERVAL_TICKS,
+            min_dwell_ticks: DEFAULT_AI_MIN_DWELL_TICKS,
+        }
+    }
+}
+
+/// `MeleeBrain` (近接 AI) のパラメータ。range は `_enter`/`_exit` 2 段のヒステリシスで
+/// 境界振動を構造的に吸収する (ADR-0035 チャタリング防止 軸 1)。`Default` は
+/// `DEFAULT_AI_*` 定数群と同値。
+///
+/// 単純な data type (Component ではない)。実体は `features::character::ai::MeleeBrain.config`
+/// が保持し、Brain の意思決定パラメータとして使われる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MeleeConfig {
+    /// 共通 FSM パラメータ。YAML 上は flat field (`chase_enter_range_px` 等) として展開される
+    /// (ADR-0039、`#[serde(flatten)]`)。
+    #[serde(flatten)]
+    pub engagement: EngagementConfig,
+    /// target 選定戦略 (ADR-0039)。未指定 = `Nearest` で Phase 1.1 既存挙動互換。
+    #[serde(default)]
+    pub selector: TargetSelector,
+}
+
+/// `AllyBrain` (味方 NPC AI) のパラメータ。Chase / Attack の hysteresis は `EngagementConfig`
+/// と同じ枠組みで、追加で Player との Follow 距離 hysteresis を持つ (ADR-0035 Phase 2)。
+///
+/// 単純な data type (Component ではない)。実体は `features::character::ai::AllyBrain.config`
+/// が保持し、Brain の意思決定パラメータとして使われる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AllyConfig {
+    /// 共通 FSM パラメータ (`#[serde(flatten)]` で YAML 上は flat field として展開される)。
+    #[serde(flatten)]
+    pub engagement: EngagementConfig,
+    /// Player との距離がこれ未満で Follow を停止 (= Idle 相当、move=0)。
+    #[serde(default = "default_ai_follow_distance_min_px")]
+    pub follow_distance_min_px: f32,
+    /// Player との距離がこれ超で Follow 再開。`min < max` で hysteresis を作る。
+    #[serde(default = "default_ai_follow_distance_max_px")]
+    pub follow_distance_max_px: f32,
+    /// target 選定戦略 (ADR-0039)。Ally engagement (Villain target) に作用する。
+    /// Follow target (= 最近の Hero+Human) は selector 適用対象外で常に Nearest。
+    #[serde(default)]
+    pub selector: TargetSelector,
+}
+
+const fn default_ai_follow_distance_min_px() -> f32 {
+    DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX
+}
+const fn default_ai_follow_distance_max_px() -> f32 {
+    DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX
+}
+
+const fn default_ai_chase_enter_range_px() -> f32 {
+    DEFAULT_AI_CHASE_ENTER_RANGE_PX
+}
+const fn default_ai_chase_exit_range_px() -> f32 {
+    DEFAULT_AI_CHASE_EXIT_RANGE_PX
+}
+const fn default_ai_attack_enter_range_px() -> f32 {
+    DEFAULT_AI_ATTACK_ENTER_RANGE_PX
+}
+const fn default_ai_attack_exit_range_px() -> f32 {
+    DEFAULT_AI_ATTACK_EXIT_RANGE_PX
+}
+const fn default_ai_attack_cooldown_ticks() -> u32 {
+    DEFAULT_AI_ATTACK_COOLDOWN_TICKS
+}
+const fn default_ai_decision_interval_ticks() -> u32 {
+    DEFAULT_AI_DECISION_INTERVAL_TICKS
+}
+const fn default_ai_min_dwell_ticks() -> u32 {
+    DEFAULT_AI_MIN_DWELL_TICKS
+}
+
+impl Default for AllyConfig {
+    fn default() -> Self {
+        Self {
+            engagement: EngagementConfig::default(),
+            follow_distance_min_px: DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX,
+            follow_distance_max_px: DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX,
+            selector: TargetSelector::default(),
+        }
+    }
+}
+
+/// `BotBrain` (Player 自動化 AI) のパラメータ (ADR-0038 Phase 4)。
+/// Phase 3 では `MeleeConfig` を流用していたが、YAML 化に伴い `Bot` 専用の Config 型を
+/// 切る。フィールド構成は `EngagementConfig` 共有のみ (= 雑魚 Enemy と同調律で動く)。
+/// Bot 専用 param (perception / panic / replay 等) が必要になったら本 struct に追加する。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BotConfig {
+    /// 共通 FSM パラメータ (`#[serde(flatten)]` で YAML 上は flat field として展開される)。
+    #[serde(flatten)]
+    pub engagement: EngagementConfig,
+    /// target 選定戦略 (ADR-0039)。未指定 = `Nearest` で Phase 3 既存挙動互換。
+    #[serde(default)]
+    pub selector: TargetSelector,
+}
+
+impl BotConfig {
+    /// `BotConfig` を `MeleeConfig` に詰め替える (`BotBrain::new` が `MeleeConfig` を要求する
+    /// ため、scene spawn 時に変換する)。Phase 4 では「BotBrain の挙動 = MeleeBrain と同形」
+    /// 規約を維持しており、`BotConfig` は MeleeConfig の YAML 版という位置付け。
+    #[must_use]
+    pub fn into_melee_config(self) -> MeleeConfig {
+        MeleeConfig {
+            engagement: self.engagement,
+            selector: self.selector,
+        }
+    }
+}
+
 // === Character ===
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -249,6 +460,11 @@ pub struct Character {
     pub tag: Option<String>,
     #[serde(default)]
     pub physics: Physics,
+    /// AI Brain の設定 (ADR-0035)。`None` (YAML 未指定) なら AI Brain を attach しない
+    /// (= Player か、行動しない object として扱う)。`Some(Melee(cfg))` のときは scene 側が
+    /// `MeleeBrain::new(cfg)` を Enemy entity に attach する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiConfig>,
     /// `runtime/data/characters/{name}/sprite-groups/*.yml` から populate される。
     /// key は `SpriteGroup.number` (= Layer.sprite_group_number から参照)。
     /// YAML には書かれない。
@@ -258,6 +474,19 @@ pub struct Character {
     /// YAML には書かれない。
     #[serde(skip)]
     pub animations: Vec<Animation>,
+    /// `runtime/data/characters/{name}/sound-groups/*.yml` から populate される (ADR-0019)。
+    /// key は `SoundGroup.number` (= `Frame.sound.number` から参照)。YAML には書かれない。
+    #[serde(skip)]
+    pub sound_groups: HashMap<u32, SoundGroup>,
+}
+
+impl Character {
+    /// `Frame.sound.number` から `SoundGroup` を引く (ADR-0019)。見つからなければ `None`。
+    /// engine の SE dispatch system がこの helper 経由で SoundGroup を解決する。
+    #[must_use]
+    pub fn find_sound_group(&self, number: u32) -> Option<&SoundGroup> {
+        self.sound_groups.get(&number)
+    }
 }
 
 // === SpriteGroup / SpriteEntry ===
@@ -347,6 +576,11 @@ pub struct Frame {
     /// 3-state で、`None`=Inherit (`SpriteEntry.body_boxes` を継承)。
     #[serde(default)]
     pub body_box_overrides: Option<Vec<HitBox>>,
+    /// この frame に進入した瞬間に発火する Sound 参照 (ADR-0019)。`None` で無音。
+    /// `number` は `Character.sound_groups` の key、`delay_ms` は frame 進入から
+    /// 再生開始までの遅延 (ms)。0 で frame 進入と同 tick に再生する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<FrameSound>,
 }
 
 // === AttackBox / HitBox / AttackBoxMeta / KnockbackVec ===
@@ -484,6 +718,94 @@ impl Layer {
     }
 }
 
+// === Sound / SoundGroup / FrameSound (ADR-0019) ===
+
+/// 同じ用途の音 (pain / death / 攻撃ボイス 等) をまとめた集合。`number` は YAML に書く
+/// 識別子で、`Frame.sound.number` から参照される。複数 `Sound` を持てば `pick` で
+/// `weight` 付きランダムに 1 つ選ばれる。editor 側の同名型と YAML 上互換。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SoundGroup {
+    /// YAML には書かれず、loader (api 側) が file stem で埋める。
+    #[serde(skip)]
+    pub name: String,
+    #[serde(default)]
+    pub number: u32,
+    #[serde(default)]
+    pub sounds: Vec<Sound>,
+}
+
+/// 1 つの音源ファイル + ボリューム + 抽選重み (ADR-0019)。`weight` は省略 / 0 / 負値で
+/// 1.0 にフォールバックされる (= 全 Sound 等確率)。明示的に重みを書いた時だけ偏らせる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Sound {
+    #[serde(default)]
+    pub index: u32,
+    /// `runtime/data/characters/{character}/sound-groups/{group}/sounds/` 起点の相対 path。
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub volume: f32,
+    #[serde(default)]
+    pub weight: f32,
+}
+
+/// Frame に紐づく Sound 参照 + 再生遅延 (ADR-0019 / ADR-0034)。
+///
+/// 3 系統の SoundGroup 参照で attacker 側 attack 結果ごとに出し分ける:
+/// - `number`: 既定 (= 攻撃の振り音 / Hit voice / 通常時セリフ等、無条件で frame 進入時に
+///   latch したい音全般)。`AttackOutcome::Idle` 時、または on_hit/on_guard が None 時の
+///   フォールバック先
+/// - `on_hit`: 直近 AttackBox が Hit したときに優先 latch
+/// - `on_guard`: 直近 AttackBox が Guard されたときに優先 latch
+///
+/// `delay_ms` は 3 系統共通で frame 進入から再生開始までの遅延 (ms)。
+/// engine の dispatch tick = `VSYNC_TICK` (≈16.667ms) なので実効分解能は 1 tick 単位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FrameSound {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_hit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_guard: Option<u32>,
+    #[serde(default)]
+    pub delay_ms: u32,
+}
+
+impl SoundGroup {
+    /// 重み付きランダムで `Sound` を 1 つ選ぶ (ADR-0019)。`rand` は `f32 ∈ [0, 1)` を返す
+    /// closure (テストで決定的にできる)。
+    ///
+    /// 規約:
+    /// - 空 group は `None`
+    /// - `weight <= 0.0` は 1.0 として扱う (= 等確率 fallback)
+    /// - 累積比較が浮動小数誤差で末尾を抜けたら末尾要素を返す
+    pub fn pick<F: FnOnce() -> f32>(&self, rand: F) -> Option<&Sound> {
+        if self.sounds.is_empty() {
+            return None;
+        }
+        let total: f32 = self.sounds.iter().map(|s| effective_weight(s.weight)).sum();
+        if total <= 0.0 {
+            // 全要素が weight 不正 (NaN 等)。先頭で safety net。
+            return self.sounds.first();
+        }
+        let mut roll = rand() * total;
+        for s in &self.sounds {
+            roll -= effective_weight(s.weight);
+            if roll <= 0.0 {
+                return Some(s);
+            }
+        }
+        // 累積比較で末尾を抜けた (浮動小数誤差) 場合の fallback
+        self.sounds.last()
+    }
+}
+
+/// `weight <= 0.0` (NaN 含む) を 1.0 に倒す。ADR-0019 の「省略時 = 等確率」を表現する。
+fn effective_weight(w: f32) -> f32 {
+    if w > 0.0 { w } else { 1.0 }
+}
+
 // === helpers ===
 
 fn default_hp() -> u32 {
@@ -506,6 +828,9 @@ fn offset_xy(opt: Option<[i32; 2]>) -> (i32, i32) {
 
 #[cfg(test)]
 mod tests {
+    // ADR-0035 Phase 2: 新規追加した AiConfig::Ally の round-trip test で
+    // refutable let-else の fallback panic! を使うため。
+    #![allow(clippy::panic)]
     use super::*;
 
     // Physics::default は DEFAULT_* 定数をそのまま代入しているので bit-exact 一致を期待する。
@@ -743,6 +1068,554 @@ meta:
         let ov: AttackBoxOverride = serde_saphyr::from_str(yaml)?;
         assert!(ov.hitbox.is_none());
         assert!(ov.meta.is_none());
+        Ok(())
+    }
+
+    // === Sound / SoundGroup (ADR-0019) ===
+
+    fn make_group(weights: &[f32]) -> SoundGroup {
+        SoundGroup {
+            name: "g".into(),
+            number: 1,
+            sounds: weights
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| Sound {
+                    index: u32::try_from(i).unwrap_or(u32::MAX),
+                    path: format!("{i}.wav"),
+                    volume: 1.0,
+                    weight: w,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn sound_group_pick_empty_returns_none() {
+        let g = make_group(&[]);
+        assert!(g.pick(|| 0.5).is_none());
+    }
+
+    #[test]
+    fn sound_group_pick_single_returns_that_sound() {
+        let g = make_group(&[1.0]);
+        let s = g.pick(|| 0.5).expect("pick");
+        assert_eq!(s.index, 0);
+    }
+
+    #[test]
+    fn sound_group_pick_uniform_weights_distributes_by_roll() {
+        // 3 要素 weight=1 (total=3)。roll=0.0 → idx 0, roll=0.5 → idx 1, roll=0.9 → idx 2。
+        let g = make_group(&[1.0, 1.0, 1.0]);
+        assert_eq!(g.pick(|| 0.0).expect("pick").index, 0);
+        assert_eq!(g.pick(|| 0.5).expect("pick").index, 1);
+        assert_eq!(g.pick(|| 0.9).expect("pick").index, 2);
+    }
+
+    #[test]
+    fn sound_group_pick_zero_weight_falls_back_to_one() {
+        // 全 weight=0 → effective_weight 経由で全部 1.0 として扱われ等確率。
+        let g = make_group(&[0.0, 0.0, 0.0]);
+        assert_eq!(g.pick(|| 0.0).expect("pick").index, 0);
+        assert_eq!(g.pick(|| 0.5).expect("pick").index, 1);
+        assert_eq!(g.pick(|| 0.9).expect("pick").index, 2);
+    }
+
+    #[test]
+    fn sound_group_pick_negative_weight_falls_back_to_one() {
+        // 負値 / NaN は effective_weight で 1.0 に倒れる。
+        let g = make_group(&[-1.0, 1.0]);
+        // total = 1.0 + 1.0 = 2.0 → roll=0.0 → idx 0
+        assert_eq!(g.pick(|| 0.0).expect("pick").index, 0);
+        assert_eq!(g.pick(|| 0.6).expect("pick").index, 1);
+    }
+
+    #[test]
+    fn sound_group_pick_weighted_biases_toward_heavy() {
+        // weight 比率 1 : 3 (total 4)。roll=0.0 → idx 0、roll=0.249 → idx 0、
+        // roll=0.251 → idx 1。
+        let g = make_group(&[1.0, 3.0]);
+        assert_eq!(g.pick(|| 0.0).expect("pick").index, 0);
+        assert_eq!(g.pick(|| 0.249).expect("pick").index, 0);
+        assert_eq!(g.pick(|| 0.251).expect("pick").index, 1);
+        assert_eq!(g.pick(|| 0.99).expect("pick").index, 1);
+    }
+
+    #[test]
+    fn sound_group_pick_returns_last_on_float_overshoot() {
+        // roll が total を僅かに超える浮動小数誤差ケース。`rand=1.0` でも末尾 fallback で必ず Some。
+        let g = make_group(&[1.0, 1.0]);
+        let s = g.pick(|| 1.0).expect("must fall back to last on overshoot");
+        assert_eq!(s.index, 1);
+    }
+
+    #[test]
+    fn sound_group_round_trip_from_yaml() -> anyhow::Result<()> {
+        let yaml = r"
+number: 1
+sounds:
+- index: 0
+  path: pain_a.wav
+  volume: 0.8
+  weight: 2.0
+- index: 1
+  path: pain_b.wav
+  volume: 0.8
+";
+        let g: SoundGroup = serde_saphyr::from_str(yaml)?;
+        assert_eq!(g.number, 1);
+        assert_eq!(g.sounds.len(), 2);
+        assert_eq!(g.sounds[0].path, "pain_a.wav");
+        assert!((g.sounds[0].weight - 2.0).abs() < f32::EPSILON);
+        // weight 省略は 0.0 (= engine 側で 1.0 にフォールバック)
+        assert!((g.sounds[1].weight).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn frame_sound_round_trip_from_yaml() -> anyhow::Result<()> {
+        let yaml = r"
+index: 0
+ticks: 5
+sound:
+  number: 3
+  delay_ms: 50
+layers: []
+";
+        let f: Frame = serde_saphyr::from_str(yaml)?;
+        let s = f.sound.expect("sound should be Some");
+        assert_eq!(s.number, Some(3));
+        assert_eq!(s.delay_ms, 50);
+        assert!(s.on_hit.is_none());
+        assert!(s.on_guard.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn frame_sound_hit_guard_round_trip_from_yaml() -> anyhow::Result<()> {
+        // ADR-0034: on_hit / on_guard を含む新スキーマの round-trip。number 省略も許可。
+        let yaml = r"
+index: 0
+ticks: 5
+sound:
+  on_hit: 7
+  on_guard: 8
+layers: []
+";
+        let f: Frame = serde_saphyr::from_str(yaml)?;
+        let s = f.sound.expect("sound should be Some");
+        assert!(s.number.is_none(), "number 省略時は None");
+        assert_eq!(s.on_hit, Some(7));
+        assert_eq!(s.on_guard, Some(8));
+        Ok(())
+    }
+
+    #[test]
+    fn frame_sound_all_three_fields_round_trip() -> anyhow::Result<()> {
+        // 3 系統全部書く YAML も読める (Idle/Hit/Guarded のいずれでも何か鳴らす狙い)。
+        let yaml = r"
+index: 0
+ticks: 5
+sound:
+  number: 1
+  on_hit: 2
+  on_guard: 3
+  delay_ms: 30
+layers: []
+";
+        let f: Frame = serde_saphyr::from_str(yaml)?;
+        let s = f.sound.expect("sound should be Some");
+        assert_eq!(s.number, Some(1));
+        assert_eq!(s.on_hit, Some(2));
+        assert_eq!(s.on_guard, Some(3));
+        assert_eq!(s.delay_ms, 30);
+        Ok(())
+    }
+
+    #[test]
+    fn frame_without_sound_field_is_none() -> anyhow::Result<()> {
+        let yaml = r"
+index: 0
+ticks: 5
+layers: []
+";
+        let f: Frame = serde_saphyr::from_str(yaml)?;
+        assert!(f.sound.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn character_find_sound_group_round_trip() {
+        let mut c = Character::default();
+        c.sound_groups.insert(7, make_group(&[1.0]));
+        assert!(c.find_sound_group(7).is_some());
+        assert!(c.find_sound_group(99).is_none());
+    }
+
+    // === AiConfig / MeleeConfig (ADR-0035) ===
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn melee_config_default_matches_engine_constants() {
+        let m = MeleeConfig::default();
+        assert_eq!(
+            m.engagement.chase_enter_range_px,
+            DEFAULT_AI_CHASE_ENTER_RANGE_PX
+        );
+        assert_eq!(
+            m.engagement.chase_exit_range_px,
+            DEFAULT_AI_CHASE_EXIT_RANGE_PX
+        );
+        assert_eq!(
+            m.engagement.attack_enter_range_px,
+            DEFAULT_AI_ATTACK_ENTER_RANGE_PX
+        );
+        assert_eq!(
+            m.engagement.attack_exit_range_px,
+            DEFAULT_AI_ATTACK_EXIT_RANGE_PX
+        );
+        assert_eq!(
+            m.engagement.attack_cooldown_ticks,
+            DEFAULT_AI_ATTACK_COOLDOWN_TICKS
+        );
+        assert_eq!(
+            m.engagement.decision_interval_ticks,
+            DEFAULT_AI_DECISION_INTERVAL_TICKS
+        );
+        assert_eq!(m.engagement.min_dwell_ticks, DEFAULT_AI_MIN_DWELL_TICKS);
+    }
+
+    #[test]
+    fn ai_config_melee_yaml_round_trip() -> anyhow::Result<()> {
+        // ADR-0039: `EngagementConfig` の `#[serde(flatten)]` で flat YAML schema を保つ。
+        let yaml = r"
+kind: melee
+chase_enter_range_px: 150.0
+chase_exit_range_px: 180.0
+attack_enter_range_px: 30.0
+attack_exit_range_px: 40.0
+attack_cooldown_ticks: 45
+decision_interval_ticks: 3
+min_dwell_ticks: 10
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Melee(m) = ai else {
+            panic!("expected AiConfig::Melee");
+        };
+        assert!((m.engagement.chase_enter_range_px - 150.0).abs() < f32::EPSILON);
+        assert!((m.engagement.attack_enter_range_px - 30.0).abs() < f32::EPSILON);
+        assert_eq!(m.engagement.attack_cooldown_ticks, 45);
+        assert_eq!(m.engagement.decision_interval_ticks, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn ai_config_melee_partial_yaml_fills_defaults() -> anyhow::Result<()> {
+        // 部分指定 (chase_enter_range_px のみ書く) で残りが DEFAULT_AI_* で補完されること。
+        let yaml = r"
+kind: melee
+chase_enter_range_px: 150.0
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Melee(m) = ai else {
+            panic!("expected AiConfig::Melee");
+        };
+        assert!((m.engagement.chase_enter_range_px - 150.0).abs() < f32::EPSILON);
+        assert_eq!(
+            m.engagement.attack_cooldown_ticks,
+            DEFAULT_AI_ATTACK_COOLDOWN_TICKS
+        );
+        assert_eq!(m.engagement.min_dwell_ticks, DEFAULT_AI_MIN_DWELL_TICKS);
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn ally_config_default_matches_engine_constants() {
+        let a = AllyConfig::default();
+        assert_eq!(a.follow_distance_min_px, DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX);
+        assert_eq!(a.follow_distance_max_px, DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX);
+        assert_eq!(
+            a.engagement.chase_enter_range_px,
+            DEFAULT_AI_CHASE_ENTER_RANGE_PX
+        );
+        assert_eq!(
+            a.engagement.attack_enter_range_px,
+            DEFAULT_AI_ATTACK_ENTER_RANGE_PX
+        );
+        assert_eq!(
+            a.engagement.attack_cooldown_ticks,
+            DEFAULT_AI_ATTACK_COOLDOWN_TICKS
+        );
+        assert_eq!(
+            a.engagement.decision_interval_ticks,
+            DEFAULT_AI_DECISION_INTERVAL_TICKS
+        );
+        assert_eq!(a.engagement.min_dwell_ticks, DEFAULT_AI_MIN_DWELL_TICKS);
+    }
+
+    #[test]
+    fn ai_config_ally_yaml_round_trip() -> anyhow::Result<()> {
+        let yaml = r"
+kind: ally
+follow_distance_min_px: 50.0
+follow_distance_max_px: 100.0
+chase_enter_range_px: 180.0
+attack_cooldown_ticks: 30
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Ally(a) = ai else {
+            panic!("expected AiConfig::Ally");
+        };
+        assert!((a.follow_distance_min_px - 50.0).abs() < f32::EPSILON);
+        assert!((a.follow_distance_max_px - 100.0).abs() < f32::EPSILON);
+        assert!((a.engagement.chase_enter_range_px - 180.0).abs() < f32::EPSILON);
+        assert_eq!(a.engagement.attack_cooldown_ticks, 30);
+        // 部分指定で残りが DEFAULT_AI_* で補完されること。
+        assert_eq!(a.engagement.min_dwell_ticks, DEFAULT_AI_MIN_DWELL_TICKS);
+        Ok(())
+    }
+
+    #[test]
+    fn character_without_ai_field_yields_none() -> anyhow::Result<()> {
+        // `ai:` 行が書かれていない既存 YAML (= hero 等) は `Character.ai` が None になる
+        // (= AI Brain を attach しない、後方互換)。
+        let yaml = r"
+name: hero
+hp: 100
+";
+        let c: Character = serde_saphyr::from_str(yaml)?;
+        assert!(c.ai.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn character_with_ai_melee_field_parses() -> anyhow::Result<()> {
+        let yaml = r"
+name: grunt
+ai:
+  kind: melee
+  attack_enter_range_px: 25.0
+";
+        let c: Character = serde_saphyr::from_str(yaml)?;
+        let Some(AiConfig::Melee(m)) = c.ai else {
+            panic!("expected AiConfig::Melee");
+        };
+        assert!((m.engagement.attack_enter_range_px - 25.0).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    // === BotConfig / AiConfig::Bot (ADR-0038) ===
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn bot_config_default_matches_engine_constants() {
+        let b = BotConfig::default();
+        assert_eq!(
+            b.engagement.chase_enter_range_px,
+            DEFAULT_AI_CHASE_ENTER_RANGE_PX
+        );
+        assert_eq!(
+            b.engagement.attack_enter_range_px,
+            DEFAULT_AI_ATTACK_ENTER_RANGE_PX
+        );
+        assert_eq!(
+            b.engagement.attack_cooldown_ticks,
+            DEFAULT_AI_ATTACK_COOLDOWN_TICKS
+        );
+        assert_eq!(
+            b.engagement.decision_interval_ticks,
+            DEFAULT_AI_DECISION_INTERVAL_TICKS
+        );
+        assert_eq!(b.engagement.min_dwell_ticks, DEFAULT_AI_MIN_DWELL_TICKS);
+    }
+
+    #[test]
+    fn ai_config_bot_yaml_round_trip() -> anyhow::Result<()> {
+        let yaml = r"
+kind: bot
+chase_enter_range_px: 150.0
+chase_exit_range_px: 180.0
+attack_enter_range_px: 30.0
+attack_exit_range_px: 40.0
+attack_cooldown_ticks: 45
+decision_interval_ticks: 3
+min_dwell_ticks: 10
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Bot(b) = ai else {
+            panic!("expected AiConfig::Bot");
+        };
+        assert!((b.engagement.chase_enter_range_px - 150.0).abs() < f32::EPSILON);
+        assert!((b.engagement.attack_enter_range_px - 30.0).abs() < f32::EPSILON);
+        assert_eq!(b.engagement.attack_cooldown_ticks, 45);
+        assert_eq!(b.engagement.decision_interval_ticks, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn ai_config_bot_partial_yaml_fills_defaults() -> anyhow::Result<()> {
+        let yaml = r"
+kind: bot
+chase_enter_range_px: 150.0
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Bot(b) = ai else {
+            panic!("expected AiConfig::Bot");
+        };
+        assert!((b.engagement.chase_enter_range_px - 150.0).abs() < f32::EPSILON);
+        assert_eq!(
+            b.engagement.attack_cooldown_ticks,
+            DEFAULT_AI_ATTACK_COOLDOWN_TICKS
+        );
+        assert_eq!(b.engagement.min_dwell_ticks, DEFAULT_AI_MIN_DWELL_TICKS);
+        Ok(())
+    }
+
+    #[test]
+    fn character_with_ai_bot_field_parses() -> anyhow::Result<()> {
+        let yaml = r"
+name: bot-hero
+ai:
+  kind: bot
+  attack_enter_range_px: 30.0
+";
+        let c: Character = serde_saphyr::from_str(yaml)?;
+        let Some(AiConfig::Bot(b)) = c.ai else {
+            panic!("expected AiConfig::Bot");
+        };
+        assert!((b.engagement.attack_enter_range_px - 30.0).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn bot_config_into_melee_config_preserves_fields() {
+        // ADR-0038/0039: BotConfig::into_melee_config は BotBrain attach 時に MeleeConfig へ
+        // 詰め替えるための薄い変換。EngagementConfig 共有 + selector も持ち越されることを担保。
+        let b = BotConfig {
+            engagement: EngagementConfig {
+                chase_enter_range_px: 1.0,
+                chase_exit_range_px: 2.0,
+                attack_enter_range_px: 3.0,
+                attack_exit_range_px: 4.0,
+                attack_cooldown_ticks: 5,
+                decision_interval_ticks: 6,
+                min_dwell_ticks: 7,
+            },
+            selector: TargetSelector::LastEngaged,
+        };
+        let m = b.into_melee_config();
+        assert_eq!(m.engagement.chase_enter_range_px, 1.0);
+        assert_eq!(m.engagement.chase_exit_range_px, 2.0);
+        assert_eq!(m.engagement.attack_enter_range_px, 3.0);
+        assert_eq!(m.engagement.attack_exit_range_px, 4.0);
+        assert_eq!(m.engagement.attack_cooldown_ticks, 5);
+        assert_eq!(m.engagement.decision_interval_ticks, 6);
+        assert_eq!(m.engagement.min_dwell_ticks, 7);
+        assert_eq!(m.selector, TargetSelector::LastEngaged);
+    }
+
+    // === TargetSelector (ADR-0039) ===
+
+    #[test]
+    fn target_selector_default_is_nearest() {
+        // ADR-0039: 既存 YAML が selector 未指定でも Nearest にフォールバックする = 既存挙動互換。
+        assert_eq!(TargetSelector::default(), TargetSelector::Nearest);
+    }
+
+    #[test]
+    fn melee_config_default_selector_is_nearest() {
+        // Config 経由でも default で Nearest になることを担保 (`#[serde(default)]` 経由)。
+        assert_eq!(MeleeConfig::default().selector, TargetSelector::Nearest);
+        assert_eq!(AllyConfig::default().selector, TargetSelector::Nearest);
+        assert_eq!(BotConfig::default().selector, TargetSelector::Nearest);
+    }
+
+    #[test]
+    fn ai_config_melee_yaml_without_selector_yields_nearest() -> anyhow::Result<()> {
+        // ADR-0039: 旧 YAML (selector 行なし) は Nearest を埋める = 既存 sample-projects/minimal
+        // の grunt YAML が無編集で読める。
+        let yaml = r"
+kind: melee
+chase_enter_range_px: 150.0
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Melee(m) = ai else {
+            panic!("expected AiConfig::Melee");
+        };
+        assert_eq!(m.selector, TargetSelector::Nearest);
+        Ok(())
+    }
+
+    #[test]
+    fn ai_config_melee_yaml_with_selector_last_engaged_round_trip() -> anyhow::Result<()> {
+        let yaml = r"
+kind: melee
+chase_enter_range_px: 150.0
+selector: last_engaged
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Melee(m) = ai else {
+            panic!("expected AiConfig::Melee");
+        };
+        assert_eq!(m.selector, TargetSelector::LastEngaged);
+        Ok(())
+    }
+
+    #[test]
+    fn ai_config_ally_yaml_with_selector_last_engaged_round_trip() -> anyhow::Result<()> {
+        // ADR-0039 Phase 2 補追動機 (Ally の継続追跡) の YAML 例。
+        let yaml = r"
+kind: ally
+follow_distance_min_px: 40.0
+selector: last_engaged
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Ally(a) = ai else {
+            panic!("expected AiConfig::Ally");
+        };
+        assert_eq!(a.selector, TargetSelector::LastEngaged);
+        Ok(())
+    }
+
+    #[test]
+    fn ai_config_bot_yaml_with_selector_round_trip() -> anyhow::Result<()> {
+        let yaml = r"
+kind: bot
+selector: nearest
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Bot(b) = ai else {
+            panic!("expected AiConfig::Bot");
+        };
+        assert_eq!(b.selector, TargetSelector::Nearest);
+        Ok(())
+    }
+
+    #[test]
+    fn target_selector_stub_variants_round_trip() -> anyhow::Result<()> {
+        // ADR-0039: Random / WeightedByThreat は variant のみ実装 (stub)。YAML を書いた時点で
+        // deserialize できることだけ確認する (実行時挙動は ai.rs の warn fallback test 側)。
+        let yaml = r"
+kind: melee
+selector: random
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Melee(m) = ai else {
+            panic!("expected AiConfig::Melee");
+        };
+        assert_eq!(m.selector, TargetSelector::Random);
+
+        let yaml = r"
+kind: melee
+selector: weighted_by_threat
+";
+        let ai: AiConfig = serde_saphyr::from_str(yaml)?;
+        let AiConfig::Melee(m) = ai else {
+            panic!("expected AiConfig::Melee");
+        };
+        assert_eq!(m.selector, TargetSelector::WeightedByThreat);
         Ok(())
     }
 }

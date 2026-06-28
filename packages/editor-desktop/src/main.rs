@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
 
 fn main() {
-    editor_desktop::entrypoint();
+    bebeu_editor_desktop::entrypoint();
 }

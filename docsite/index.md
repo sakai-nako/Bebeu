@@ -19,7 +19,7 @@ features:
     link: /editor/
     linkText: editor のドキュメントへ
   - title: engine
-    details: Bevy 製ランタイム (`beatemup` バイナリ)。editor で作成した Project を読み込んで動作する。
+    details: Bevy 製ランタイム (`bebeu-engine` バイナリ)。editor で作成した Project を読み込んで動作する。
     link: /engine/
     linkText: engine のドキュメントへ
 ---

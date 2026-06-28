@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. v0.1.0). Used only for workflow_dispatch runs to label the zip; no tag is created.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain (channel pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: packages/editor-desktop/package-lock.json
+
+      - name: Install editor npm deps
+        working-directory: packages/editor-desktop
+        run: npm ci
+
+      - name: Build tailwind css (editor assets! requires it at compile time)
+        working-directory: packages/editor-desktop
+        run: npx @tailwindcss/cli -i tailwind.css -o assets/tailwind.css --minify
+
+      - name: Install dioxus-cli
+        run: cargo install dioxus-cli --version '^0.7' --locked
+
+      - name: Build engine (release)
+        run: cargo build --release -p bebeu-engine --bin bebeu-engine
+
+      - name: Build editor-desktop (dx release)
+        working-directory: packages/editor-desktop
+        run: dx build --platform desktop --release
+
+      - name: Assemble zip
+        id: assemble
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
+          if (-not $tag) { throw 'tag name is empty' }
+          $stage = "Bebeu-$tag-windows-x64"
+          $zipName = "$stage.zip"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          # engine
+          Copy-Item target/release/bebeu-engine.exe $stage/
+
+          # editor-desktop (dx build output — locate the desktop release dir to absorb dx version differences)
+          $dxDir = Get-ChildItem -Path target/dx -Recurse -Directory -Filter desktop |
+                   Where-Object { $_.FullName -match 'bebeu-editor-desktop[\\/]release[\\/]desktop$' } |
+                   Select-Object -First 1
+          if (-not $dxDir) { throw 'dx build output not found under target/dx' }
+          Get-ChildItem -Path $dxDir.FullName | Copy-Item -Destination $stage -Recurse
+
+          # sample-projects/minimal — the only project shipped, referenced by bebeu-editor.yml below
+          Copy-Item -Recurse sample-projects $stage/
+
+          # licenses
+          Copy-Item LICENSE-MIT $stage/
+          Copy-Item LICENSE-APACHE $stage/
+
+          # bebeu-editor.yml — editor reads `current_exe().parent()/bebeu-editor.yml` in release builds
+          # (see packages/editor-desktop/src/shared/config.rs). Relative workspace_dir resolves against
+          # CWD, which run-editor.cmd pins to the zip root.
+          Set-Content -Path "$stage/bebeu-editor.yml" -NoNewline -Value @'
+          workspace_dir: sample-projects/minimal
+          '@
+
+          # run-engine.cmd — engine has no equivalent of editor's exe-relative config lookup.
+          # CARGO_MANIFEST_DIR fallback in shared/config.rs points at the builder's PC, so we MUST
+          # supply BEATEMUP_RUNTIME_DIR. cd /d %~dp0 also pins CWD for Bevy's AssetServer.
+          Set-Content -Path "$stage/run-engine.cmd" -Value @'
+          @echo off
+          cd /d %~dp0
+          set BEATEMUP_RUNTIME_DIR=sample-projects\minimal
+          bebeu-engine.exe %*
+          '@
+
+          # run-editor.cmd — bebeu-editor.yml lookup is exe-relative, but the workspace_dir inside
+          # the yml is CWD-relative. Pin CWD to zip root.
+          Set-Content -Path "$stage/run-editor.cmd" -Value @'
+          @echo off
+          cd /d %~dp0
+          bebeu-editor-desktop.exe %*
+          '@
+
+          # README.txt — quick start + platform note
+          Set-Content -Path "$stage/README.txt" -Value @"
+          Bebeu $tag (Windows x64)
+
+          A Bevy-based engine and Dioxus desktop editor for side-scrolling
+          beat-em-ups. Bundled with the CC0 sample project (sample-projects/minimal)
+          so you can run the engine and the editor without any extra setup.
+
+          --- Run the sample ---
+
+          1. Double-click run-engine.cmd  -> launches the engine on sample-projects/minimal.
+                                            Press Enter or Space on the title scene to
+                                            advance to the battle scene.
+          2. Double-click run-editor.cmd  -> launches the editor with sample-projects/minimal
+                                            as the workspace.
+
+          --- Point at your own project ---
+
+          Engine: edit run-engine.cmd and change BEATEMUP_RUNTIME_DIR to a folder that
+          contains data/projects, data/characters, data/levels (use sample-projects/minimal
+          as a template — copy it elsewhere and edit the YAML in place).
+
+          Editor: edit bebeu-editor.yml and change workspace_dir to the same folder.
+
+          --- Platforms ---
+
+          Windows x64 only for this release. macOS / Linux builds are wanted — the project
+          builds on those platforms in principle (Bevy and Dioxus both support them) but
+          has not been verified. See the GitHub repository for the upstream issue.
+
+          --- License ---
+
+          Source: dual-licensed under MIT (LICENSE-MIT) or Apache-2.0 (LICENSE-APACHE)
+          at your option.
+
+          Sample assets under sample-projects/ (generated by tools/asset-gen) are released
+          under CC0 1.0 Universal.
+          "@
+
+          # Zip it
+          Compress-Archive -Path $stage -DestinationPath $zipName -Force
+          "zip=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Create draft release with artifact
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: ${{ steps.assemble.outputs.zip }}

@@ -66,7 +66,7 @@ fn setup(mut commands: Commands, mut selection: ResMut<TitleMenuSelection>) {
     commands.spawn((
         Text2d::new("Bebeu"),
         TextFont {
-            font_size: TITLE_FONT_SIZE,
+            font_size: FontSize::Px(TITLE_FONT_SIZE),
             ..default()
         },
         TextColor(Color::WHITE),
@@ -81,7 +81,7 @@ fn setup(mut commands: Commands, mut selection: ResMut<TitleMenuSelection>) {
         commands.spawn((
             Text2d::new(label),
             TextFont {
-                font_size: MENU_FONT_SIZE,
+                font_size: FontSize::Px(MENU_FONT_SIZE),
                 ..default()
             },
             TextColor(color),

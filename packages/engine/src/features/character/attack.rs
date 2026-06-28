@@ -1,12 +1,14 @@
 //! Attack hit 判定 (FSD: feature slice)。
 //!
-//! ADR-0024 Phase A + B:
+//! ADR-0024 Phase A + B / ADR-0036 attacker-agnostic 化 / ADR-0038 Side 統一:
 //! - [`AttackBox`] / [`BodyBox`] は world 座標 (画像ピクセル, ADR-0023) で表す軸並行ボックス。
 //!   形状は YAML 駆動 (`Frame.attack_box_overrides`)。fallback ジオメトリは frame に geom が
 //!   無いときの保険として残す。
-//! - Player が [`CharacterState::Attack`] かつ frame に attack_meta があるとき
-//!   (= `AnimationFrames::current_attack_meta` が `Some`) だけ player の前方に AttackBox を
-//!   生やし、全 [`Enemy`] の BodyBox と AABB 判定する。
+//! - attacker が [`CharacterState::Attack`] かつ frame に attack_meta が
+//!   あるとき (= `AnimationFrames::current_attack_meta` が `Some`) だけ attacker の前方に
+//!   AttackBox を生やし、反対 [`Side`] の victim の BodyBox と AABB 判定する。
+//!   Hero attacker / Villain attacker の 2 経路を [`resolve_hero_attacks`] /
+//!   [`resolve_villain_attacks`] に分け、inner helper [`try_apply_attack_to_victim`] を共通利用。
 //! - ヒット時は `Combatant.gauge` を `meta.knockback_damage` で削り、`knockback_resistance`
 //!   で減衰させる。次のいずれかで **吹っ飛び発動** (`CharacterState::KnockbackUp` 遷移):
 //!     - gauge が枯れた (`<= 0`)
@@ -17,24 +19,38 @@
 //!   充填し、`remaining_bounces` / `gauge` を初期値に reset。致命傷なら `final_action=Dead`
 //!   を立てて [`super::knockback::advance_stage_timer`] が LieDown で永続停止させる。
 //! - 通常 Hit のときは `gauge_recovery_remaining_ticks` を立てる (間隔があけば自然回復)。
-//! - 既に死亡 (HP=0) している enemy は AABB チェックを skip。
-//! - 1 attack で同じ enemy を多重 hit しないよう、player に [`AttackHitConsumed`] フラグ。
+//! - 既に死亡 (HP=0) している victim は AABB チェックを skip。
+//! - 1 attack で同じ victim を多重 hit しないよう、attacker に [`AttackHitConsumed`] フラグ。
 use bevy::prelude::*;
 
 use crate::entities::character::{AttackBoxMeta, KnockbackVec, Role};
 use crate::shared::projection::{WorldBox, world_box_from_hitbox};
 
+use super::ai::MeleeBrain;
 use super::animation::{AnimationFrames, AnimationSet};
 use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
 use super::knockback::{Combatant, FinalAction, KinematicVel, PhysicsParams, ms_to_ticks};
-use super::movement::{Enemy, Facing, LastEngagedWith, Player, WorldPosition};
-use super::state_machine::{CharacterState, EnemyAnimationSet};
+use super::movement::{Facing, LastEngagedWith, Side, WorldPosition};
+use super::sound::AttackOutcome;
+use super::state_machine::{CharacterState, EnemyAnimationSet, PlayerAnimationLibrary};
 
-/// player が今 attack の hit frame に居て、AttackBox が active な状態かを判定する。
+/// Attack 系 system の実行フェーズ識別 (Bevy `SystemSet`)。
+///
+/// `AttackSet::Resolve` の **後に走らせる必要のある system**:
+/// - [`super::sound::tick_sound_dispatch`] (ADR-0034: 同 tick で `AttackOutcome` を見て
+///   on_hit / on_guard を選ぶため、resolve 系が確定した後に走らせる)
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AttackSet {
+    /// ADR-0036 / ADR-0038: `resolve_hero_attacks` と `resolve_villain_attacks` の両方が走る
+    /// フェーズ。Hit / Guard / Miss の結果がここで `AttackOutcome` に書き込まれる。
+    Resolve,
+}
+
+/// attacker が今 attack の hit frame に居て、AttackBox が active な状態かを判定する。
 /// 判定根拠は frame の `attack_box_overrides` の有無 (YAML 駆動)。`AnimationFrames` に
 /// 焼き込まれた `current_attack_meta()` を見て、`Some` なら hit active と扱う。
-/// `resolve_hits` (実際の当たり判定) と `hitbox_debug` (可視化) の両方から使う。
+/// resolve 系 (実際の当たり判定) と `hitbox_debug` (可視化) の両方から使う。
 /// `Attack` / `DownAttack` / `JumpAttack` の 3 state で active 扱い (= 違いは AttackBox
 /// 幾何だけ。Phase は Attack 側と一様、攻撃側の高度差は WorldPosition.y に乗る、ADR-0027)。
 #[must_use]
@@ -45,7 +61,7 @@ pub fn is_attack_hit_active(state: CharacterState, anim: &AnimationFrames) -> bo
     ) && anim.current_attack_meta().is_some()
 }
 
-/// player 中心から AttackBox 中心までの前方 X オフセット (画像ピクセル)。
+/// attacker 中心から AttackBox 中心までの前方 X オフセット (画像ピクセル)。
 const DEFAULT_ATTACK_OFFSET_X: f32 = 16.0;
 /// Box の Y 中心を「足元 (= `pos.y`) からどれだけ持ち上げるか」。胴体中央あたり。
 const DEFAULT_BOX_CENTER_Y: f32 = 30.0;
@@ -57,7 +73,8 @@ const DEFAULT_ATTACK_HALF_X: f32 = 12.0;
 const DEFAULT_ATTACK_HALF_Y: f32 = 20.0;
 const DEFAULT_ATTACK_HALF_Z: f32 = 8.0;
 
-/// 被弾耐久。`current = 0` で `is_dead`、その瞬間に entity が despawn される (`resolve_hits` 側)。
+/// 被弾耐久。`current = 0` で `is_dead`。Phase B 以降、entity は despawn せず KO 演出
+/// (LieDown 永続停止) で残骸として残る (ADR-0024 / ADR-0036)。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HitPoints {
     pub current: u32,
@@ -81,8 +98,9 @@ impl HitPoints {
     }
 }
 
-/// player が「現在の attack window 中に既にヒットを 1 回消費したか」のフラグ。
-/// Attack state に入った瞬間に false にリセットされ、ヒット解決で true に立つ。
+/// attacker (Player or Enemy) が「現在の attack window 中に既にヒットを 1 回消費したか」の
+/// フラグ。Attack state に入った瞬間に false にリセットされ、ヒット解決で true に立つ。
+/// ADR-0036: 両 marker に attach する。
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct AttackHitConsumed(pub bool);
 
@@ -208,7 +226,12 @@ impl Plugin for AttackPlugin {
             (
                 reset_attack_hit_on_attack_start,
                 sync_body_box,
-                resolve_hits,
+                // ADR-0038: Hero attacker (旧 Player + Ally) と Villain attacker (旧 Enemy)
+                // の 2 system を AttackSet::Resolve に並べる。disjoint は **Brain marker
+                // `MeleeBrain` の有無** で取る (Villain は MeleeBrain 持ち、Hero は持たない)。
+                // 両 system の victim query は反対 Side の archetype に向かうので、`&mut
+                // HitPoints` 等の競合は archetype 単位で排他される。
+                (resolve_hero_attacks, resolve_villain_attacks).in_set(AttackSet::Resolve),
             )
                 .chain()
                 // sync_body_box は現 frame の geom を使うので、tick で frame が進んだ後に
@@ -259,14 +282,14 @@ fn sync_body_box(
     }
 }
 
-/// CharacterState が Attack / DownAttack に変わった瞬間 (Changed<CharacterState> で発火) に
-/// AttackHitConsumed を false に戻す。これで「次の attack で再度 hit window を消費できる」
-/// 状態になる。
+/// CharacterState が Attack / DownAttack / JumpAttack に変わった瞬間
+/// (`Changed<CharacterState>` で発火) に AttackHitConsumed を false に戻す。これで「次の
+/// attack で再度 hit window を消費できる」状態になる。
+///
+/// ADR-0036: attacker-agnostic 化。Player / Enemy 区別なく `AttackHitConsumed` を持つ entity
+/// 全てが対象。Enemy も attacker として attack に入った瞬間に hit-consume をリセットする。
 fn reset_attack_hit_on_attack_start(
-    mut query: Query<
-        (&CharacterState, &mut AttackHitConsumed),
-        (With<Player>, Changed<CharacterState>),
-    >,
+    mut query: Query<(&CharacterState, &mut AttackHitConsumed), Changed<CharacterState>>,
 ) {
     for (state, mut consumed) in &mut query {
         if matches!(
@@ -352,46 +375,61 @@ fn decide_hit(
     HitOutcome { damage, knockback }
 }
 
-/// player が Attack の hit frame に居れば AttackBox を作り、全 Enemy の BodyBox と AABB 判定。
-/// ヒットしたら `decide_hit` の結果で:
-/// - 致命傷 (HP=0) → **knockback 強制発動 + `final_action = Dead`** (Phase B)。
+/// attacker が Attack の hit frame に居れば AttackBox を作り、反対 Side victim の BodyBox と
+/// AABB 判定。ヒットしたら `decide_hit` の結果で:
+/// - 致命傷 (HP=0) → **knockback 強制発動 + `final_action = Dead`** (ADR-0024 Phase B)。
 ///   `decide_hit` が knockback を返さなかった場合でも meta.knockback を attenuation して充填。
 /// - knockback 発動 → `KinematicVel` 充填 + `CharacterState::KnockbackUp` + `Combatant.gauge`
 ///   を threshold に戻す + `remaining_bounces` を `bounce_count` に reset
 /// - 通常 hit → `CharacterState::Hit` + `Combatant.gauge_recovery_remaining_ticks` を立てる
 ///
 /// hit_stop は **通常 Hit 経路のみ** で適用する (knockback 発動時は hit_stop 無しで即遷移)。
-/// 既に死亡 (HP=0) している enemy は AABB チェック前に skip し、二重 hit を防ぐ。
-/// 1 attack で同 enemy を複数回叩かないよう、最初のヒットで [`AttackHitConsumed`] を立てる。
-/// enemy 1 体に対する hit 処理の結果。呼び出し元は outer loop の流れ (continue / break) を
+/// 既に死亡 (HP=0) している victim は AABB チェック前に skip し、二重 hit を防ぐ。
+/// 1 attack で同 victim を複数回叩かないよう、最初のヒットで [`AttackHitConsumed`] を立てる。
+///
+/// ADR-0036 / ADR-0038: Hero attacker / Villain attacker の両方から `try_apply_attack_to_victim`
+/// を共通利用する。
+///
+/// victim 1 体に対する hit 処理の結果。呼び出し元は outer loop の流れ (continue / break) を
 /// この返り値で判定する。
 enum HitDecision {
-    /// AABB が当たらない or cap 到達 / 死亡 enemy 等で hit させない。次の enemy へ。
-    SkipEnemy,
-    /// 1 hit を成立させた。同 frame で他の enemy には当てない (= 1 attack 1 hit)。
-    BreakAttack,
+    /// AABB が当たらない or cap 到達 / 死亡 victim 等で hit させない。次の victim へ。
+    SkipVictim,
+    /// 1 hit を成立させた。同 frame で他の victim には当てない (= 1 attack 1 hit)。
+    /// ADR-0034: `outcome` は SE 出し分け (`on_hit` / `on_guard`) のために attacker 側
+    /// `AttackOutcome` に書き込まれる。Guard 成立で `Guarded`、通常 hit で `Hit`。
+    BreakAttack { outcome: AttackOutcome },
 }
 
-fn resolve_hits(
+/// ADR-0038: Hero attacker (= 旧 Player + Ally) 経路。attacker / victim Query の disjoint は
+/// `Without<MeleeBrain>` / `With<MeleeBrain>` で作る (Villain は MeleeBrain 持ち)。
+/// `LastEngagedWith` は `Controller::Human` 持ち attacker のみ attach されており、Optional
+/// component として参照する (= Player attacker でだけ engagement-link の起点が書き込まれる、
+/// ADR-0031 維持)。`&Side` は inner skip 用に取って Hero 限定に絞る。
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn resolve_hero_attacks(
     mut commands: Commands,
-    // Player / Enemy が同 entity に同時に attach されることは無い前提だが、Bevy の static
-    // 解析は marker だけでは Query 間の disjoint を保証できないので、`Without` を明示する
-    // (CharacterState を player は &, enemy は &mut で取るため B0001 を回避)。
-    mut player_query: Query<
+    mut attacker_query: Query<
         (
+            Entity,
             &WorldPosition,
             &Facing,
             &CharacterState,
             &AnimationFrames,
             &mut AttackHitConsumed,
             &CharacterDepth,
-            // ADR-0031: Hit が成立した瞬間に書き込む。HUD の engagement-link 系
-            // enemy_hp_bar が `target: { last_engaged_by: pX }` で参照する。
-            &mut LastEngagedWith,
+            // ADR-0031: Controller::Human 持ち attacker (= 旧 Player) のみが attach されている
+            // engagement state。HUD の `enemy_hp_bar { last_engaged_by: pX }` の起点。
+            Option<&mut LastEngagedWith>,
+            // ADR-0034: 1 hit / guard 成立で SE 出し分け用 state を書き込む。spawn 時に
+            // attach されている前提 (= battle.rs の hero / ally spawn 経路で
+            // AttackOutcome::default を insert する)。
+            &mut AttackOutcome,
+            &Side,
         ),
-        (With<Player>, Without<Enemy>),
+        Without<MeleeBrain>,
     >,
-    mut enemy_query: Query<
+    mut victim_query: Query<
         (
             Entity,
             &BodyBox,
@@ -403,72 +441,82 @@ fn resolve_hits(
             &mut Combatant,
             &PhysicsParams,
             &mut KinematicVel,
+            &Side,
         ),
-        (With<Enemy>, Without<Player>),
+        With<MeleeBrain>,
     >,
-    player_entity_query: Query<Entity, With<Player>>,
 ) {
-    for (pos, facing, state, anim, mut consumed, depth, mut last_engaged) in &mut player_query {
-        if !is_attack_hit_active(*state, anim) || consumed.0 {
+    for (
+        attacker_entity,
+        pos,
+        facing,
+        state,
+        anim,
+        mut consumed,
+        depth,
+        last_engaged,
+        mut attack_outcome,
+        atk_side,
+    ) in &mut attacker_query
+    {
+        if !matches!(atk_side, Side::Hero) {
             continue;
         }
-        let Some(meta) = anim.current_attack_meta().copied() else {
+        let Some((meta, attack_box)) = build_attack_box(*state, anim, *pos, *facing, *depth) else {
             continue;
         };
-        // sync_body_box / sync_transform と揃えて integer snap (pixel grid 上で当たり判定)。
-        let (sx, sy, sz) = (pos.x.round(), pos.y.round(), pos.z.round());
-        let attack_box = anim.current_attack_box_geom().map_or_else(
-            || AttackBox::from_attacker(WorldPosition::new(sx, sy, sz), *facing),
-            |geom| {
-                AttackBox::from_world_box(world_box_from_hitbox(
-                    geom,
-                    anim.current_sprite_pivot(),
-                    sx,
-                    sy,
-                    sz,
-                    matches!(facing, Facing::Left),
-                    depth.0,
-                ))
-            },
-        );
-        let player_entity = player_entity_query.single().ok();
+        if consumed.0 {
+            continue;
+        }
+        let mut last_engaged = last_engaged;
         for (
-            enemy_entity,
+            victim_entity,
             body,
-            enemy_pos,
-            enemy_facing,
+            victim_pos,
+            victim_facing,
             mut hp,
-            mut enemy_state,
-            enemy_anims,
+            mut victim_state,
+            victim_anims,
             mut combatant,
             phys,
             mut vel,
-        ) in &mut enemy_query
+            vic_side,
+        ) in &mut victim_query
         {
-            let decision = try_apply_attack_to_enemy(
+            if !matches!(vic_side, Side::Villain) {
+                continue;
+            }
+            // ADR-0036: hit_stop の fallback duration は victim 側の Hit role first frame。
+            // Villain victim は entity 持ちの EnemyAnimationSet から引く。
+            let victim_hit_fallback_ms = victim_anims
+                .get(Role::Hit)
+                .and_then(|data| data.frames.first())
+                .map(|f| u32::try_from(f.duration.as_millis()).unwrap_or(u32::MAX));
+            let decision = try_apply_attack_to_victim(
                 &mut commands,
                 &meta,
                 &attack_box,
                 *facing,
-                player_entity,
-                enemy_entity,
+                Some(attacker_entity),
+                victim_entity,
                 body,
-                enemy_pos.y,
-                *enemy_facing,
+                victim_pos.y,
+                *victim_facing,
                 &mut hp,
-                &mut enemy_state,
-                enemy_anims,
+                &mut victim_state,
+                victim_hit_fallback_ms,
                 &mut combatant,
                 phys,
                 &mut vel,
                 &mut consumed,
             );
             match decision {
-                HitDecision::SkipEnemy => {}
-                HitDecision::BreakAttack => {
-                    // 1 attack 1 hit が成立。HUD の engagement-link 系がこの player を
-                    // 最後の attacker として参照できるよう、被弾 enemy を記録する。
-                    last_engaged.0 = Some(enemy_entity);
+                HitDecision::SkipVictim => {}
+                HitDecision::BreakAttack { outcome } => {
+                    if let Some(last) = last_engaged.as_mut() {
+                        last.0 = Some(victim_entity);
+                    }
+                    *attack_outcome = outcome;
                     break;
                 }
             }
@@ -476,77 +524,241 @@ fn resolve_hits(
     }
 }
 
-/// `resolve_hits` の inner loop body。enemy 1 体について「AABB → cap → Guard / 通常 hit」を
-/// 順に処理し、流れの制御を [`HitDecision`] で呼び出し元に返す。
+/// ADR-0038: Villain attacker (= 旧 Enemy) 経路。attacker / victim Query の disjoint は
+/// `With<MeleeBrain>` / `Without<MeleeBrain>` で作る。victim = `Side::Hero` 全部 (= 旧 Player
+/// + 旧 Ally の両方)。`LastEngagedWith` は Villain 側に持たない。
+///
+/// victim 側 Hit role first frame の引き先は **entity 持ち `EnemyAnimationSet` を優先、無ければ
+/// `PlayerAnimationLibrary` Resource にフォールバック** (= 旧 Player victim は Resource、旧
+/// Ally victim は entity 持ちで動いていた挙動の両立)。
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn resolve_villain_attacks(
+    mut commands: Commands,
+    mut attacker_query: Query<
+        (
+            Entity,
+            &WorldPosition,
+            &Facing,
+            &CharacterState,
+            &AnimationFrames,
+            &mut AttackHitConsumed,
+            &CharacterDepth,
+            &mut AttackOutcome,
+            &Side,
+        ),
+        With<MeleeBrain>,
+    >,
+    mut victim_query: Query<
+        (
+            Entity,
+            &BodyBox,
+            &WorldPosition,
+            &Facing,
+            &mut HitPoints,
+            &mut CharacterState,
+            Option<&EnemyAnimationSet>,
+            &mut Combatant,
+            &PhysicsParams,
+            &mut KinematicVel,
+            &Side,
+        ),
+        Without<MeleeBrain>,
+    >,
+    player_library: Res<PlayerAnimationLibrary>,
+) {
+    // Player victim の Hit role first frame は library から事前計算 (旧 resolve_enemy_attacks
+    // と同じ — 全 Player entity で共通 Resource を引く)。
+    let player_hit_fallback_ms = player_library
+        .get(Role::Hit)
+        .and_then(|data| data.frames.first())
+        .map(|f| u32::try_from(f.duration.as_millis()).unwrap_or(u32::MAX));
+    for (
+        attacker_entity,
+        pos,
+        facing,
+        state,
+        anim,
+        mut consumed,
+        depth,
+        mut attack_outcome,
+        atk_side,
+    ) in &mut attacker_query
+    {
+        if !matches!(atk_side, Side::Villain) {
+            continue;
+        }
+        let Some((meta, attack_box)) = build_attack_box(*state, anim, *pos, *facing, *depth) else {
+            continue;
+        };
+        if consumed.0 {
+            continue;
+        }
+        for (
+            victim_entity,
+            body,
+            victim_pos,
+            victim_facing,
+            mut hp,
+            mut victim_state,
+            victim_anims,
+            mut combatant,
+            phys,
+            mut vel,
+            vic_side,
+        ) in &mut victim_query
+        {
+            if !matches!(vic_side, Side::Hero) {
+                continue;
+            }
+            // Ally victim は entity 持ちの EnemyAnimationSet、Player victim は Resource を
+            // フォールバックに使う。`Option<&EnemyAnimationSet>` で両立。
+            let victim_hit_fallback_ms = victim_anims
+                .and_then(|s| {
+                    s.get(Role::Hit)
+                        .and_then(|data| data.frames.first())
+                        .map(|f| u32::try_from(f.duration.as_millis()).unwrap_or(u32::MAX))
+                })
+                .or(player_hit_fallback_ms);
+            let decision = try_apply_attack_to_victim(
+                &mut commands,
+                &meta,
+                &attack_box,
+                *facing,
+                Some(attacker_entity),
+                victim_entity,
+                body,
+                victim_pos.y,
+                *victim_facing,
+                &mut hp,
+                &mut victim_state,
+                victim_hit_fallback_ms,
+                &mut combatant,
+                phys,
+                &mut vel,
+                &mut consumed,
+            );
+            match decision {
+                HitDecision::SkipVictim => {}
+                HitDecision::BreakAttack { outcome } => {
+                    *attack_outcome = outcome;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// attacker の現 frame から AttackBox 幾何 + AttackBoxMeta を構築する。`is_attack_hit_active`
+/// が false (= attack 中だが hit frame ではない) または attack_meta が無い frame では `None`。
+/// `resolve_hero_attacks` / `resolve_villain_attacks` の 2 経路で共通利用する (ADR-0038)。
+fn build_attack_box(
+    state: CharacterState,
+    anim: &AnimationFrames,
+    pos: WorldPosition,
+    facing: Facing,
+    depth: CharacterDepth,
+) -> Option<(AttackBoxMeta, AttackBox)> {
+    if !is_attack_hit_active(state, anim) {
+        return None;
+    }
+    let meta = anim.current_attack_meta().copied()?;
+    // sync_body_box / sync_transform と揃えて integer snap (pixel grid 上で当たり判定)。
+    let (sx, sy, sz) = (pos.x.round(), pos.y.round(), pos.z.round());
+    let attack_box = anim.current_attack_box_geom().map_or_else(
+        || AttackBox::from_attacker(WorldPosition::new(sx, sy, sz), facing),
+        |geom| {
+            AttackBox::from_world_box(world_box_from_hitbox(
+                geom,
+                anim.current_sprite_pivot(),
+                sx,
+                sy,
+                sz,
+                matches!(facing, Facing::Left),
+                depth.0,
+            ))
+        },
+    );
+    Some((meta, attack_box))
+}
+
+/// `resolve_hero_attacks` / `resolve_villain_attacks` の inner loop body。victim 1 体に
+/// ついて「AABB → cap → Guard / 通常 hit」を順に処理し、流れの制御を [`HitDecision`] で
+/// 呼び出し元に返す。
+///
+/// ADR-0036: attacker-agnostic。attacker が Player か Enemy かは知らない。victim_*
+/// 引数は被弾側、attacker_facing / attacker_entity は攻撃側。`victim_hit_fallback_ms` は
+/// hit_stop.duration_ms が未指定のときに使う「victim の Hit role first frame duration」を
+/// 呼び出し側が事前計算して渡したもの (Enemy victim は EnemyAnimationSet 由来、Player victim
+/// は PlayerAnimationLibrary 由来)。
 ///
 /// 引数が多いのは ECS の Query から取り出した個別 component をそのまま受けるため
 /// (struct 化すると lifetime / borrow が煩雑になる)。意味の単位はコメントの段で区切る。
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn try_apply_attack_to_enemy(
+fn try_apply_attack_to_victim(
     commands: &mut Commands,
     meta: &AttackBoxMeta,
     attack_box: &AttackBox,
-    player_facing: Facing,
-    player_entity: Option<Entity>,
-    enemy_entity: Entity,
+    attacker_facing: Facing,
+    attacker_entity: Option<Entity>,
+    victim_entity: Entity,
     body: &BodyBox,
-    enemy_pos_y: f32,
-    enemy_facing: Facing,
+    victim_pos_y: f32,
+    victim_facing: Facing,
     hp: &mut HitPoints,
-    enemy_state: &mut CharacterState,
-    enemy_anims: &EnemyAnimationSet,
+    victim_state: &mut CharacterState,
+    victim_hit_fallback_ms: Option<u32>,
     combatant: &mut Combatant,
     phys: &PhysicsParams,
     vel: &mut KinematicVel,
     consumed: &mut AttackHitConsumed,
 ) -> HitDecision {
-    // 既に死亡している enemy は AABB チェックすら不要。攻撃判定の二重発火と、
+    // 既に死亡している victim は AABB チェックすら不要。攻撃判定の二重発火と、
     // KO 演出 (LieDown 永続停止) 中の再被弾を両方避ける。
     if hp.is_dead() {
-        return HitDecision::SkipEnemy;
+        return HitDecision::SkipVictim;
     }
     if !aabb_intersects(attack_box, body) {
-        return HitDecision::SkipEnemy;
+        return HitDecision::SkipVictim;
     }
-    // 永久パターン回避: cap 到達中の敵は「完全無敵」(damage / state / gauge / consumed
-    // 全てスキップ)。`SkipEnemy` で次の enemy に進むので、同 swing 内で並んでいる
-    // 後ろの非 cap 敵には引き続き当たる (= 無敵敵を「素通り」して別の敵を当てに行ける)。
-    // decide_hit の前に判定するのは、decide_hit が gauge を副作用で削るため
-    // (= 無敵敵には gauge も触らせない)。致命傷も cap 中は通さない (= 倒れたまま
-    // 完全無敵フェーズ、再 KO 演出は走らない)。
+    // 永久パターン回避: cap 到達中の victim は「完全無敵」(damage / state / gauge / consumed
+    // 全てスキップ)。`SkipVictim` で次の victim に進むので、同 swing 内で並んでいる
+    // 後ろの非 cap victim には引き続き当たる (= 無敵 victim を「素通り」して別の victim
+    // を当てに行ける)。decide_hit の前に判定するのは、decide_hit が gauge を副作用で
+    // 削るため (= 無敵 victim には gauge も触らせない)。致命傷も cap 中は通さない
+    // (= 倒れたまま完全無敵フェーズ、再 KO 演出は走らない)。
     let already_airborne = matches!(
-        *enemy_state,
+        *victim_state,
         CharacterState::KnockbackUp
             | CharacterState::KnockbackDown
             | CharacterState::BounceUp
             | CharacterState::BounceDown
     );
     let is_down = matches!(
-        *enemy_state,
+        *victim_state,
         CharacterState::Slide | CharacterState::LieDown | CharacterState::Rise
     );
     if already_airborne && combatant.juggle_count >= phys.0.max_juggle_count {
         tracing::debug!(
-            enemy = ?enemy_entity,
+            victim = ?victim_entity,
             juggle_count = combatant.juggle_count,
             "attack: juggle cap reached, hit nullified",
         );
-        return HitDecision::SkipEnemy;
+        return HitDecision::SkipVictim;
     }
     if is_down && combatant.down_hit_count >= phys.0.max_down_hit_count {
         tracing::debug!(
-            enemy = ?enemy_entity,
+            victim = ?victim_entity,
             down_hit_count = combatant.down_hit_count,
             "attack: down_hit cap reached, hit nullified",
         );
-        return HitDecision::SkipEnemy;
+        return HitDecision::SkipVictim;
     }
     // ADR-0028: Guard 中の被弾は damage / knockback_gauge を無傷化し、guard_gauge だけ
     // を `guard_damage` で削る。`guard_gauge <= 0` で GuardBreak に遷移し、
     // `KinematicVel` に `physics.guard_break_knockback` を Facing 反転して充填する。
     // 次フレームで `advance_guard_break` が KnockbackUp に書き換えて ADR-0024 の
     // 吹っ飛びフローに合流する (= 既存の Bounce / Slide / LieDown / Rise を再利用)。
-    if matches!(*enemy_state, CharacterState::Guard) {
+    if matches!(*victim_state, CharacterState::Guard) {
         consumed.0 = true;
         let att = attenuation(phys.0.knockback_resistance);
         #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
@@ -555,7 +767,7 @@ fn try_apply_attack_to_enemy(
         combatant.guard_gauge = combatant.guard_gauge.saturating_sub(guard_damage);
         combatant.guard_recovery_remaining_ticks = ms_to_ticks(phys.0.guard_recovery_ms);
         tracing::info!(
-            enemy = ?enemy_entity,
+            victim = ?victim_entity,
             guard_damage,
             guard_gauge = combatant.guard_gauge,
             "attack: guarded",
@@ -564,7 +776,7 @@ fn try_apply_attack_to_enemy(
             // GuardBreak 発動: guard_break_knockback を Facing 反転して KinematicVel に
             // 充填、Combatant の knockback 系 runtime state をリセット。state を
             // GuardBreak に倒し、advance_guard_break が次 frame で KnockbackUp に変える。
-            let kb = effective_knockback(phys.0.guard_break_knockback, player_facing, att);
+            let kb = effective_knockback(phys.0.guard_break_knockback, attacker_facing, att);
             vel.vel_x = kb.vel_x;
             vel.vel_y = kb.vel_y;
             vel.vel_z = kb.vel_z;
@@ -572,24 +784,28 @@ fn try_apply_attack_to_enemy(
             combatant.gauge_recovery_remaining_ticks = 0;
             combatant.remaining_bounces = phys.0.bounce_count;
             combatant.final_action = FinalAction::LieDown;
-            combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, enemy_facing);
+            combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, victim_facing);
             combatant.guard_gauge = i32::try_from(phys.0.guard_break_threshold).unwrap_or(i32::MAX);
             combatant.guard_recovery_remaining_ticks = 0;
-            *enemy_state = CharacterState::GuardBreak;
+            *victim_state = CharacterState::GuardBreak;
             tracing::info!(
-                enemy = ?enemy_entity,
+                victim = ?victim_entity,
                 vel_x = kb.vel_x, vel_y = kb.vel_y,
                 "attack: guard broken",
             );
         }
-        return HitDecision::BreakAttack;
+        // ADR-0034: ガード成立は Guarded 扱い (GuardBreak で吹っ飛んだケースも
+        // "ガードされた音" を鳴らすのが自然 — GuardBreak は guard 中に発生するため)。
+        return HitDecision::BreakAttack {
+            outcome: AttackOutcome::Guarded,
+        };
     }
     consumed.0 = true;
-    let outcome = decide_hit(meta, player_facing, enemy_pos_y, combatant, phys);
+    let outcome = decide_hit(meta, attacker_facing, victim_pos_y, combatant, phys);
     hp.damage(outcome.damage);
     let lethal = hp.is_dead();
     tracing::info!(
-        enemy = ?enemy_entity,
+        victim = ?victim_entity,
         damage = outcome.damage,
         remaining = hp.current,
         gauge = combatant.gauge,
@@ -601,7 +817,7 @@ fn try_apply_attack_to_enemy(
         lethal.then(|| {
             effective_knockback(
                 meta.knockback,
-                player_facing,
+                attacker_facing,
                 attenuation(phys.0.knockback_resistance),
             )
         })
@@ -624,13 +840,13 @@ fn try_apply_attack_to_enemy(
         } else {
             FinalAction::LieDown
         };
-        combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, enemy_facing);
+        combatant.hit_from_behind = is_hit_from_behind(kb.vel_x, victim_facing);
         if already_airborne {
             combatant.juggle_count = combatant.juggle_count.saturating_add(1);
         }
-        *enemy_state = CharacterState::KnockbackUp;
+        *victim_state = CharacterState::KnockbackUp;
         tracing::info!(
-            enemy = ?enemy_entity,
+            victim = ?victim_entity,
             vel_x = kb.vel_x, vel_y = kb.vel_y, vel_z = kb.vel_z,
             final_action = ?combatant.final_action,
             hit_from_behind = combatant.hit_from_behind,
@@ -642,45 +858,44 @@ fn try_apply_attack_to_enemy(
         // 自然回復する。hit_stop は attack 側 meta.hit_stop の指定通りに発動。
         // **Down 中 (Slide / LieDown / Rise) の被弾は地上 hit ポーズ用に DownHit に
         // 遷移**: 通常の Hit (立ちポーズ前提) を地面に伏せた状態で使うのは不自然。
-        // (cap 到達 down_hit はそもそも上で SkipEnemy されているので、ここに来た時点で
+        // (cap 到達 down_hit はそもそも上で SkipVictim されているので、ここに来た時点で
         // count はまだ余裕がある。)
         if is_down {
-            *enemy_state = CharacterState::DownHit;
+            *victim_state = CharacterState::DownHit;
             combatant.down_hit_count = combatant.down_hit_count.saturating_add(1);
         } else {
-            *enemy_state = CharacterState::Hit;
+            *victim_state = CharacterState::Hit;
         }
         combatant.gauge_recovery_remaining_ticks = ms_to_ticks(phys.0.hit_recovery_ms);
-        if let Some(hs) = meta.hit_stop {
-            let fallback_ms = enemy_anims
-                .get(Role::Hit)
-                .and_then(|data| data.frames.first())
-                .map(|f| u32::try_from(f.duration.as_millis()).unwrap_or(u32::MAX));
-            if let Some(duration_ms) = hs.duration_ms.or(fallback_ms) {
-                commands.entity(enemy_entity).insert(HitStopState::victim(
-                    duration_ms,
-                    hs.shake_x,
-                    hs.shake_y,
-                    hs.count,
-                    hs.decay,
-                ));
-                if let Some(player_entity) = player_entity {
-                    commands
-                        .entity(player_entity)
-                        .insert(HitStopState::attacker(duration_ms));
-                }
-                tracing::info!(
-                    duration_ms,
-                    shake_x = hs.shake_x,
-                    shake_y = hs.shake_y,
-                    count = hs.count,
-                    decay = hs.decay,
-                    "attack: hit_stop applied",
-                );
+        if let Some(hs) = meta.hit_stop
+            && let Some(duration_ms) = hs.duration_ms.or(victim_hit_fallback_ms)
+        {
+            commands.entity(victim_entity).insert(HitStopState::victim(
+                duration_ms,
+                hs.shake_x,
+                hs.shake_y,
+                hs.count,
+                hs.decay,
+            ));
+            if let Some(attacker_entity) = attacker_entity {
+                commands
+                    .entity(attacker_entity)
+                    .insert(HitStopState::attacker(duration_ms));
             }
+            tracing::info!(
+                duration_ms,
+                shake_x = hs.shake_x,
+                shake_y = hs.shake_y,
+                count = hs.count,
+                decay = hs.decay,
+                "attack: hit_stop applied",
+            );
         }
     }
-    HitDecision::BreakAttack
+    // ADR-0034: 通常 Hit / Knockback / DownHit のいずれも attacker 側 SE は `on_hit` を選ぶ。
+    HitDecision::BreakAttack {
+        outcome: AttackOutcome::Hit,
+    }
 }
 
 #[cfg(test)]

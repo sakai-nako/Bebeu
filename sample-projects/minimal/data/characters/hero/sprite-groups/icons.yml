@@ -1,0 +1,24 @@
+name: icons
+number: 100
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes: null
+  attack_boxes: null
+- index: 1
+  path: 002.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes: null
+  attack_boxes: null
+- index: 2
+  path: 003.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes: null
+  attack_boxes: null

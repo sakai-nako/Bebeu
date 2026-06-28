@@ -43,25 +43,25 @@ verify: fmt check build test
 [group("engine")]
 [working-directory: "packages/engine"]
 engine-run *args:
-    cargo run -p engine --bin beatemup -- {{ args }}
+    cargo run -p bebeu-engine --bin bebeu-engine -- {{ args }}
 alias en-run := engine-run
 
 [group("engine")]
 [working-directory: "packages/engine"]
 engine-run-release *args:
-    cargo run --release -p engine --bin beatemup -- {{ args }}
+    cargo run --release -p bebeu-engine --bin bebeu-engine -- {{ args }}
 alias en-run-rel := engine-run-release
 
 [group("engine")]
 engine-test *args:
-    cargo nextest run -p engine {{ args }}
+    cargo nextest run -p bebeu-engine {{ args }}
 alias en-test := engine-test
 
 # sample-projects/minimal を engine で起動 (CC0 placeholder で動く、--project main で battle scene へ)。
 [group("engine")]
 [working-directory: "packages/engine"]
 engine-run-sample *args:
-    BEATEMUP_RUNTIME_DIR=../../sample-projects/minimal cargo run -p engine --bin beatemup -- {{ args }}
+    BEATEMUP_RUNTIME_DIR=../../sample-projects/minimal cargo run -p bebeu-engine --bin bebeu-engine -- {{ args }}
 alias en-run-sample := engine-run-sample
 
 
@@ -112,13 +112,13 @@ alias ed-d-dev := editor-desktop-dev
 [group("editor-desktop")]
 [working-directory: "packages/editor-desktop"]
 editor-desktop-run *args: editor-desktop-css
-    cargo run -p editor-desktop -- {{ args }}
+    cargo run -p bebeu-editor-desktop -- {{ args }}
 alias ed-d-run := editor-desktop-run
 
 [group("editor-desktop")]
 [working-directory: "packages/editor-desktop"]
 editor-desktop-run-release *args: editor-desktop-css
-    cargo run --release -p editor-desktop -- {{ args }}
+    cargo run --release -p bebeu-editor-desktop -- {{ args }}
 alias ed-d-run-rel := editor-desktop-run-release
 
 [group("editor-desktop")]
@@ -135,7 +135,7 @@ alias ed-d-bundle := editor-desktop-bundle
 
 [group("editor-desktop")]
 editor-desktop-test *args:
-    cargo nextest run -p editor-desktop {{ args }}
+    cargo nextest run -p bebeu-editor-desktop {{ args }}
 alias ed-d-test := editor-desktop-test
 
 

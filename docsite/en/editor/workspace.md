@@ -23,3 +23,7 @@ Workspace directory layout:
 ```
 
 By default `sample-projects/minimal` works as the workspace directory directly (a minimal project built from CC0 placeholder assets). To start your own project, copy `sample-projects/minimal` somewhere outside the repo and point `workspace_dir` at the new path.
+
+## Environment variable override
+
+Setting `BEATEMUP_EDITOR_WORKSPACE_DIR` makes the editor use that value as the workspace directory directly, bypassing both `bebeu-editor.yml` and the folder picker. Useful when you want to try a different workspace (e.g. the sample project) without editing the YAML. `just editor-desktop-dev-sample` uses this path.

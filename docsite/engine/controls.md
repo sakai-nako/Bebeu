@@ -50,3 +50,7 @@ scaffolding 段階のため、現状はキーボード入力のみ対応。Gamep
 - `Physics.max_down_hit_count` — 倒れ中被弾 (DownHit) の上限。同様に完全無敵化
 
 Guard 中に `guard_gauge` を削り切ると **GuardBreak** (ガードクラッシュ) が発動し、`Physics.guard_break_knockback` を充填して `KnockbackUp` に合流する (ADR-0028)。
+
+## HUD 表示
+
+Battle scene では Project YAML の `hud:` セクションに従って HP バー / リング / 敵 HP バーが描画される。要素の種類と配置スキーマは [editor / HUD レイアウト](../editor/hud.md) を参照。`hud:` を持たない Project では HUD は出ない (空 HUD 扱い)。

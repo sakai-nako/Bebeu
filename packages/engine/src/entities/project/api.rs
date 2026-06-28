@@ -97,32 +97,43 @@ mod tests {
 
     #[test]
     fn sample_minimal_project_yaml_parses_with_all_hud_kinds() -> Result<()> {
-        // sample-projects/minimal の main.yml は HUD 3 種 (player_hp_bar / enemy_hp_bar /
-        // enemy_overhead_hp_bar) を含み、スキーマ変更で壊れたらここで弾く。
+        // sample-projects/minimal の main.yml は HUD 4 種 (player_hp_bar / enemy_hp_bar /
+        // enemy_overhead_hp_bar / player_icon) を含み、スキーマ変更で壊れたらここで弾く。
+        use crate::entities::character::Role;
         use crate::entities::project::{EnemyTarget, HudElement};
         use crate::shared::PlayerId;
 
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../sample-projects/minimal/data/projects/main.yml");
         let project = Project::load_from_file(&path, "main")?;
-        assert_eq!(project.hud.elements.len(), 3);
+        assert_eq!(project.hud.elements.len(), 4);
 
         let HudElement::PlayerHpBar(p1) = &project.hud.elements[0] else {
-            panic!("expected player_hp_bar at index 0");
+            anyhow::bail!("expected player_hp_bar at index 0");
         };
         assert_eq!(p1.id.as_deref(), Some("p1_hp"));
         assert_eq!(p1.target, PlayerId::P1);
 
         let HudElement::EnemyHpBar(engaged) = &project.hud.elements[1] else {
-            panic!("expected enemy_hp_bar at index 1");
+            anyhow::bail!("expected enemy_hp_bar at index 1");
         };
         assert_eq!(engaged.target, EnemyTarget::LastEngagedBy(PlayerId::P1));
         let at = engaged.anchor_to.as_ref().expect("anchor_to set");
         assert_eq!(at.id, "p1_hp");
 
         let HudElement::EnemyOverheadHpBar(_) = &project.hud.elements[2] else {
-            panic!("expected enemy_overhead_hp_bar at index 2");
+            anyhow::bail!("expected enemy_overhead_hp_bar at index 2");
         };
+
+        let HudElement::PlayerIcon(icon) = &project.hud.elements[3] else {
+            anyhow::bail!("expected player_icon at index 3");
+        };
+        assert_eq!(icon.target, PlayerId::P1);
+        assert_eq!(icon.sprite_group_number, 100);
+        assert_eq!(icon.state_sprites.get(&Role::Attack), Some(&1));
+        assert_eq!(icon.state_sprites.get(&Role::Hit), Some(&2));
+        assert!(icon.shake.on_damage.is_some());
+        assert!(icon.shake.on_attack_hit.is_some());
         Ok(())
     }
 }

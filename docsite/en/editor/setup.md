@@ -16,13 +16,23 @@ just editor-desktop-dev     # alias: ed-d-dev
 
 This runs the tailwind `--watch` build in parallel and starts a hot-reloading dev build through `dx serve --platform desktop`.
 
+## Open the sample project (without touching the config)
+
+To open `sample-projects/minimal` without editing `bebeu-editor.yml`, use the dedicated recipe that sets `BEATEMUP_EDITOR_WORKSPACE_DIR`:
+
+```sh
+just editor-desktop-dev-sample   # alias: ed-d-dev-sample
+```
+
+Internally it runs `BEATEMUP_EDITOR_WORKSPACE_DIR=../../sample-projects/minimal dx serve ...`. The editor honours the env var first, so it launches immediately without consulting the YAML config or the folder picker.
+
 ## One-shot launch (no hot reload)
 
 ```sh
 just editor-desktop-run     # alias: ed-d-run
 ```
 
-This bypasses `dx` and launches with `cargo run -p editor-desktop`. Only the CSS is rebuilt up front.
+This bypasses `dx` and launches with `cargo run -p bebeu-editor-desktop`. Only the CSS is rebuilt up front.
 
 ## Release build / distribution package
 

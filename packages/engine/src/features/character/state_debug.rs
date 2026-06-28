@@ -21,11 +21,13 @@ use bevy::sprite::Anchor;
 use crate::app::{FINAL_PASS_LAYER, PixelPerfectConfig};
 use crate::shared::projection;
 
+use super::ai::{AllyBrain, BotBrain, BrainCounters, MeleeBrain};
 use super::animation::{AnimationFrames, AnimationSet};
 use super::attack::HitPoints;
 use super::knockback::{Combatant, PhysicsParams};
-use super::movement::{Enemy, MainCamera, Player, WorldPosition};
+use super::movement::{MainCamera, Side, WorldPosition};
 use super::state_machine::CharacterState;
+use crate::entities::character::TargetSelector;
 
 /// debug overlay の on/off。F2 で toggle。default = off。
 #[derive(Resource, Debug, Default)]
@@ -59,16 +61,16 @@ fn toggle_debug(keys: Res<ButtonInput<KeyCode>>, mut enabled: ResMut<StateDebugE
     }
 }
 
-/// 各 Player / Enemy entity に対応する `StateDebugLabel` がまだ無ければ spawn する。
-/// disabled 中も label entity は生かしておき、`Visibility` で見せ隠しする (毎回 spawn /
-/// despawn すると ECS の archetype 遷移が忙しくなる)。
+/// 各 Side 持ち entity (= 旧 Player / Enemy / Ally すべて) に対応する `StateDebugLabel` が
+/// まだ無ければ spawn する。disabled 中も label entity は生かしておき、`Visibility` で見せ
+/// 隠しする (毎回 spawn / despawn すると ECS の archetype 遷移が忙しくなる)。
 ///
 /// ラベルは `FINAL_PASS_LAYER` に配置して FinalPassCamera で描画 → window 解像度で
 /// crisp に出る。font_size は window 画素単位なので 14px で十分視認できる。
 #[allow(clippy::needless_pass_by_value)]
 fn ensure_labels(
     mut commands: Commands,
-    targets: Query<Entity, Or<(With<Player>, With<Enemy>)>>,
+    targets: Query<Entity, With<Side>>,
     labels: Query<&StateDebugLabel>,
 ) {
     let labeled: std::collections::HashSet<Entity> = labels.iter().map(|l| l.target).collect();
@@ -79,7 +81,7 @@ fn ensure_labels(
         commands.spawn((
             Text2d::new(""),
             TextFont {
-                font_size: 14.0,
+                font_size: FontSize::Px(14.0),
                 ..default()
             },
             TextColor(Color::srgb(0.85, 1.0, 0.85)),
@@ -113,6 +115,9 @@ fn update_labels(
         &Combatant,
         &PhysicsParams,
         Option<&HitPoints>,
+        Option<&MeleeBrain>,
+        Option<&AllyBrain>,
+        Option<&BotBrain>,
     )>,
     main_camera: Query<&Transform, (With<MainCamera>, Without<StateDebugLabel>)>,
     mut labels: Query<(
@@ -126,7 +131,9 @@ fn update_labels(
     let viewport_to_window = config.as_deref().map_or(1.0, viewport_to_window_scale);
     let main_cam_pos = main_camera.single().map_or(Vec3::ZERO, |t| t.translation);
     for (label_entity, label, mut text, mut transform, mut vis) in &mut labels {
-        let Ok((pos, state, anim, combatant, phys, hp)) = targets.get(label.target) else {
+        let Ok((pos, state, anim, combatant, phys, hp, melee_brain, ally_brain, bot_brain)) =
+            targets.get(label.target)
+        else {
             // target は既に despawn 済み。label も回収する。
             commands.entity(label_entity).despawn();
             continue;
@@ -139,7 +146,16 @@ fn update_labels(
         if !enabled.0 {
             continue;
         }
-        text.0 = format_label(*state, anim, combatant, phys, hp);
+        text.0 = format_label(
+            *state,
+            anim,
+            combatant,
+            phys,
+            hp,
+            melee_brain,
+            ally_brain,
+            bot_brain,
+        );
         // 頭上 (足元 +90 px) を scene world で計算 → main camera 基準にして viewport
         // 中心相対座標 → window scale を掛けて FinalPassCamera world 座標へ。
         let scene_world =
@@ -167,7 +183,7 @@ fn viewport_to_window_scale(config: &PixelPerfectConfig) -> f32 {
     n * linear_scale
 }
 
-/// 表示用 multiline 文字列を組み立てる。1 行あたり情報量を絞って 6 行に収める。
+/// 表示用 multiline 文字列を組み立てる。1 行あたり情報量を絞り、AI なしで 6 行 / AI ありで 7 行。
 ///
 /// 行構成:
 /// 1. `State(role)  t=<state 経過 tick>`
@@ -176,17 +192,26 @@ fn viewport_to_window_scale(config: &PixelPerfectConfig) -> f32 {
 /// 4. `G=<gauge>/<threshold>` (Knockback ゲージ)
 /// 5. `B=<remaining>/<max> FA=<final_action>` (Bounce 残数 + 終端 Action)
 /// 6. `HFB=<true|false>` (Hit From Behind)
+/// 7. `AI=<state> cd=<cooldown> dw=<dwell counter>` (AI Brain 持ち entity のみ、ADR-0035)
+///   - Enemy → `MeleeBrain` の MeleeState (Idle/Chase/Attack)
+///   - Ally → `AllyBrain` の AllyState (Follow/Chase/Attack)
+///   - Player + BotBrain → `BotBrain` の BotState (Idle/Chase/Attack)、ADR-0035 Phase 3
+///   - 同 entity に複数 Brain 持つことは無い前提 (= 同じ枠に出す)
 ///
 /// `f` と frame 内 tick は人間向けに 1-indexed で出し、frame count / frame 合計 tick と単位を
 /// 揃える (最終 frame の最終 tick で `f=5/5  7/7` のように見える)。
 /// `t=` (state 経過総 tick) は単独の積算値なので 0-indexed のまま。
 /// 空 animation / duration 0 frame は分子 = 0 で出す (例外的に `0/0` を許容)。
+#[allow(clippy::too_many_arguments)] // 3 Brain + 4 component を 1 文字列に焼くため、引数集約は Brain trait 抽出 (Issue #7) 待ち。
 fn format_label(
     state: CharacterState,
     anim: &AnimationFrames,
     combatant: &Combatant,
     phys: &PhysicsParams,
     hp: Option<&HitPoints>,
+    melee_brain: Option<&MeleeBrain>,
+    ally_brain: Option<&AllyBrain>,
+    bot_brain: Option<&BotBrain>,
 ) -> String {
     let role = state.to_role();
     let frame_count = anim.frame_count();
@@ -212,9 +237,58 @@ fn format_label(
     let hfb = combatant.hit_from_behind;
     let bounces = combatant.remaining_bounces;
     let max_bounces = phys.0.bounce_count;
-    format!(
+    let base = format!(
         "{state:?}({role:?}) t={state_elapsed}\nf={frame_human}/{frame_count} {tick_human}/{frame_total}\nHP={hp_str}\nG={}/{threshold}\nB={bounces}/{max_bounces} FA={final_action:?}\nHFB={hfb}",
         combatant.gauge,
+    );
+    // ADR-0035: AI Brain 持ち (= Enemy で MeleeBrain、Ally で AllyBrain、Player で BotBrain)
+    // のときだけ 7 行目を足す。Brain は同 entity に 1 種類しか attach しない前提で、複数
+    // Some 時は Melee → Ally → Bot の優先 (= 想定外、防御的に決め打ち)。target entity index は
+    // overlay の情報密度を上げすぎないため省略 (multi-player になったら追加検討)。
+    if let Some(b) = melee_brain {
+        format_ai_line(
+            &base,
+            format_args!("{:?}", b.state),
+            &b.counters,
+            b.config.selector,
+            b.target,
+        )
+    } else if let Some(b) = ally_brain {
+        format_ai_line(
+            &base,
+            format_args!("{:?}", b.state),
+            &b.counters,
+            b.config.selector,
+            b.target,
+        )
+    } else if let Some(b) = bot_brain {
+        format_ai_line(
+            &base,
+            format_args!("{:?}", b.state),
+            &b.counters,
+            b.config.selector,
+            b.target,
+        )
+    } else {
+        base
+    }
+}
+
+/// AI 行のフォーマット (ADR-0039)。3 Brain 共通の `AI=<state> cd=<cd> dw=<dwell>
+/// sel=<selector> tgt=<entity_index>` 形式。`tgt` は debug 用に `Entity.index()` を表示
+/// (`None` は `-`)。HUD identifier との対応はないが、frame ごとの target 切替が overlay
+/// から目で追える。
+fn format_ai_line(
+    base: &str,
+    state: std::fmt::Arguments<'_>,
+    counters: &BrainCounters,
+    selector: TargetSelector,
+    target: Option<bevy::ecs::entity::Entity>,
+) -> String {
+    let tgt = target.map_or_else(|| "-".to_string(), |e| format!("E{}", e.index()));
+    format!(
+        "{base}\nAI={state} cd={} dw={} sel={:?} tgt={tgt}",
+        counters.attack_cooldown_remaining, counters.frames_since_state_entered, selector,
     )
 }
 
@@ -261,7 +335,7 @@ mod tests {
             current: 30,
             max: 60,
         };
-        let s = format_label(state, &anim, &combatant, &phys, Some(&hp));
+        let s = format_label(state, &anim, &combatant, &phys, Some(&hp), None, None, None);
         assert!(s.contains("KnockbackUp"), "state: {s}");
         assert!(s.contains("t=0"), "state elapsed: {s}");
         // empty animation → 0/0 (edge case allowed)
@@ -271,6 +345,8 @@ mod tests {
         assert!(s.contains("B=2/2"), "bounces: {s}");
         assert!(s.contains("FA=LieDown"), "final_action: {s}");
         assert!(s.contains("HFB=false"), "hit_from_behind: {s}");
+        // AI Brain なし → AI= 行は付かない (Player や AI 持たない object の overlay 想定)。
+        assert!(!s.contains("AI="), "no AI line when brain is None: {s}");
     }
 
     fn dummy_frame_render(duration_ms: u64) -> crate::features::character::FrameRender {
@@ -286,6 +362,7 @@ mod tests {
             body_box_disabled: false,
             sprite_pivot: [0, 0],
             image_dims: [0, 0],
+            frame_sound: None,
         }
     }
 
@@ -298,6 +375,9 @@ mod tests {
             &anim,
             &dummy_combatant(),
             &dummy_physics(),
+            None,
+            None,
+            None,
             None,
         );
         assert!(s.contains("f=1/5"), "expected 1-indexed frame: {s}");
@@ -316,6 +396,9 @@ mod tests {
             &anim,
             &dummy_combatant(),
             &dummy_physics(),
+            None,
+            None,
+            None,
             None,
         );
         assert!(s.contains("1/5"), "expected 1/5 at start: {s}");
@@ -360,10 +443,94 @@ mod tests {
         combatant.hit_from_behind = true;
         combatant.gauge = -5;
         combatant.remaining_bounces = 0;
-        let s = format_label(state, &anim, &combatant, &dummy_physics(), None);
+        let s = format_label(
+            state,
+            &anim,
+            &combatant,
+            &dummy_physics(),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(s.contains("FA=Dead"));
         assert!(s.contains("HFB=true"));
         assert!(s.contains("G=-5/"));
         assert!(s.contains("HP=-"), "HP should show '-' when None: {s}");
+    }
+
+    #[test]
+    fn format_label_appends_ai_line_when_melee_brain_present() {
+        use crate::entities::character::MeleeConfig;
+        let mut brain = MeleeBrain::new(MeleeConfig::default());
+        brain.state = super::super::ai::EngagementState::Chase;
+        brain.counters.attack_cooldown_remaining = 32;
+        brain.counters.frames_since_state_entered = 14;
+        let s = format_label(
+            CharacterState::Walk,
+            &dummy_anim(),
+            &dummy_combatant(),
+            &dummy_physics(),
+            None,
+            Some(&brain),
+            None,
+            None,
+        );
+        assert!(s.contains("AI=Chase"), "AI state line: {s}");
+        assert!(s.contains("cd=32"), "cooldown: {s}");
+        assert!(s.contains("dw=14"), "dwell counter: {s}");
+        // ADR-0039: sel / tgt が追加表示される。target 未設定なら `tgt=-`。
+        assert!(s.contains("sel=Nearest"), "selector: {s}");
+        assert!(s.contains("tgt=-"), "no target: {s}");
+    }
+
+    #[test]
+    fn format_label_appends_ai_line_when_ally_brain_present() {
+        use crate::entities::character::{AllyConfig, EngagementConfig};
+        let mut brain = AllyBrain::new(AllyConfig {
+            engagement: EngagementConfig::default(),
+            selector: TargetSelector::LastEngaged,
+            ..AllyConfig::default()
+        });
+        brain.state = super::super::ai::AllyState::Follow;
+        brain.counters.attack_cooldown_remaining = 5;
+        brain.counters.frames_since_state_entered = 3;
+        let s = format_label(
+            CharacterState::Walk,
+            &dummy_anim(),
+            &dummy_combatant(),
+            &dummy_physics(),
+            None,
+            None,
+            Some(&brain),
+            None,
+        );
+        assert!(s.contains("AI=Follow"), "AI state line: {s}");
+        assert!(s.contains("cd=5"), "cooldown: {s}");
+        assert!(s.contains("dw=3"), "dwell counter: {s}");
+        assert!(s.contains("sel=LastEngaged"), "selector: {s}");
+    }
+
+    #[test]
+    fn format_label_appends_ai_line_when_bot_brain_present() {
+        use crate::entities::character::MeleeConfig;
+        let mut brain = BotBrain::new(MeleeConfig::default());
+        brain.state = super::super::ai::EngagementState::Attack;
+        brain.counters.attack_cooldown_remaining = 12;
+        brain.counters.frames_since_state_entered = 4;
+        let s = format_label(
+            CharacterState::Attack,
+            &dummy_anim(),
+            &dummy_combatant(),
+            &dummy_physics(),
+            None,
+            None,
+            None,
+            Some(&brain),
+        );
+        assert!(s.contains("AI=Attack"), "AI state line: {s}");
+        assert!(s.contains("cd=12"), "cooldown: {s}");
+        assert!(s.contains("dw=4"), "dwell counter: {s}");
+        assert!(s.contains("sel=Nearest"), "selector default: {s}");
     }
 }

@@ -19,7 +19,7 @@ features:
     link: /en/editor/
     linkText: Go to editor docs
   - title: engine
-    details: A Bevy-based runtime (the `beatemup` binary). Loads a Project authored in the editor and runs it.
+    details: A Bevy-based runtime (the `bebeu-engine` binary). Loads a Project authored in the editor and runs it.
     link: /en/engine/
     linkText: Go to engine docs
 ---

@@ -12,9 +12,9 @@ The directory name `local-game-editor` is the legacy package name kept for backw
 
 Fields currently stored:
 
-- Theme (`emerald` / `dark`, default `dark`)
+- Theme (`emerald` / `dark`, default `emerald`)
 - View controls / zoom step for Level editing
-- Undo/redo history capacity for Level editing
+- Undo/redo history capacity — held **independently for SpriteGroup / Animation / Level** (each defaults to 50 steps)
 - Key bindings (editable from the `Edit Key Bindings` modal inside the editor)
 
 If the file is missing or corrupt, it falls back to `Default::default()` (fail-soft). Old `preferences.yml` files missing newer fields are individually backfilled via `#[serde(default)]`.

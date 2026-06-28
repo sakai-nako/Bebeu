@@ -1,4 +1,4 @@
-//! Engine bin entrypoint。実体は [`engine::entrypoint`] に集約。
+//! Engine bin entrypoint。実体は [`bebeu_engine::entrypoint`] に集約。
 fn main() -> anyhow::Result<()> {
-    engine::entrypoint()
+    bebeu_engine::entrypoint()
 }

@@ -5,6 +5,10 @@ players:
 - hero
 opponents:
 - enemy
+# ADR-0035 Phase 2: Player の隣で共闘する味方 NPC。`ai: kind: ally` を持つ character のみ
+# 受け付ける (それ以外は battle 起動時に warn を吐いて skip)。
+allies:
+- ally
 levels:
 - training
 hud:
@@ -63,3 +67,39 @@ hud:
     vertical_anchor: image_top
     offset_y: 4.0
     fill_direction: left_to_right
+  # ADR-0033: P1 の状態を顔絵で示す Icon HUD。HP bar の真下に置き、attack で表情変化 +
+  # 被弾 / 攻撃当てで微振動。sprite_group_number は hero/sprite-groups/icons.yml の number。
+  - kind: player_icon
+    target: p1
+    anchor: top_left
+    offset:
+      x: 8.0
+      "y": 32.0
+    size:
+      w: 40.0
+      h: 40.0
+    frame:
+      thickness: 1.0
+      color: "#000000"
+    sprite_group_number: 100
+    default_sprite_index: 0
+    state_sprites:
+      idle: 0
+      walk: 0
+      attack: 1
+      hit: 2
+      knockback_up: 2
+      knockback_down: 2
+    shake:
+      on_damage:
+        duration_ms: 200
+        shake_x: 0
+        shake_y: 3
+        count: 4
+        decay: 1.0
+      on_attack_hit:
+        duration_ms: 80
+        shake_x: 2
+        shake_y: 0
+        count: 2
+        decay: 0.5

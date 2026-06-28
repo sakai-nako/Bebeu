@@ -10,5 +10,6 @@ This section walks through the editor end to end, from launching it to editing a
 - [Selecting a workspace](./workspace.md) — which workspace directory `bebeu-editor.yml` opens
 - [Project / Character / Level](./project.md) — the master pools and the Project role arrays
 - [Level](./level.md) — Level YAML schema and authoring flow
+- [HUD layout](./hud.md) — the `hud:` section of the Project YAML (placement of HP bars / rings / enemy bars)
 - [Key bindings](./keybindings.md) — keyboard shortcuts available inside the editor
 - [User preferences](./preferences.md) — theme and other settings stored at OS-standard paths

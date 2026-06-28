@@ -704,12 +704,26 @@ pub struct Frame {
     pub layers: Vec<Layer>,
 }
 
-/// Frame に紐づく Sound 参照 + 再生遅延。
-/// `number` は `SoundGroup.number` を指し、`delay_ms` は frame 進入から再生開始までの遅延 (ms)。
-/// 0 で frame 進入と同 tick に再生する。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Frame に紐づく Sound 参照 + 再生遅延 (ADR-0019 / ADR-0034)。
+///
+/// 3 系統で attacker 側 attack 結果ごとに出し分ける:
+/// - `number`: 既定 (= 振り音 / Hit voice / 通常時セリフ等、無条件で frame 進入時に latch
+///   したい音全般)。`AttackOutcome::Idle` 時、または on_hit/on_guard が None のときの
+///   フォールバック先
+/// - `on_hit`: AttackBox が Hit したときに優先
+/// - `on_guard`: AttackBox が Guard されたときに優先
+///
+/// engine 側 (`packages/engine/src/entities/character/model.rs`) と YAML 上互換。
+/// `delay_ms` は 3 系統共通で frame 進入から再生開始までの遅延 (ms)。engine の dispatch
+/// tick (≈16.667ms) 単位で丸まる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FrameSound {
-    pub number: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_hit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_guard: Option<u32>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub delay_ms: u32,
 }

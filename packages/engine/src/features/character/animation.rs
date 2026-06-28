@@ -15,7 +15,7 @@ use bevy::math::Vec2;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
-use crate::entities::character::{AttackBoxMeta, HitBox, HitStop};
+use crate::entities::character::{AttackBoxMeta, FrameSound, HitBox, HitStop};
 
 use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
@@ -80,6 +80,10 @@ pub struct FrameRender {
     /// 画像 dimensions ([width, height], px)。HUD の overhead bar が「sprite 上端 /
     /// 下端からの相対位置」で配置するために frame ごとに保持する (ADR-0032)。
     pub image_dims: [u32; 2],
+    /// この frame に進入したときに発火する Sound 参照 (ADR-0019)。`None` で無音。
+    /// `Frame.sound` を build 時に焼き込む。SoundGroup のルックアップは sound dispatch
+    /// system 側 (`super::sound`) が `CharacterSounds` component を経由して行う。
+    pub frame_sound: Option<FrameSound>,
 }
 
 #[derive(Component)]
@@ -248,6 +252,13 @@ impl AnimationFrames {
         self.current_attack_meta().and_then(|m| m.hit_stop)
     }
 
+    /// 現在 frame に紐づく Sound 参照 (ADR-0019)。`None` で無音。
+    /// sound dispatch system が frame 進入時にこれを読んで pending スロットに latch する。
+    #[must_use]
+    pub fn current_frame_sound(&self) -> Option<FrameSound> {
+        self.frames.get(self.current).and_then(|f| f.frame_sound)
+    }
+
     /// `frames[0].duration` (ms)。被弾側の Hit アニメ frame 0 を「のけぞり pose」と捉え、
     /// hit_stop.duration_ms が未指定のときの fallback duration として使う。空 frames では None。
     #[must_use]
@@ -398,6 +409,7 @@ mod tests {
             body_box_disabled: false,
             sprite_pivot: [0, 0],
             image_dims: [0, 0],
+            frame_sound: None,
         }
     }
 
@@ -637,5 +649,30 @@ mod tests {
         let frames = AnimationFrames::new(vec![f], false, 0);
         assert!(frames.current_flip_x());
         assert!((frames.current_alpha() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn current_frame_sound_returns_frame_value() {
+        let mut f0 = dummy_frame(100);
+        f0.frame_sound = Some(FrameSound {
+            number: Some(3),
+            on_hit: None,
+            on_guard: None,
+            delay_ms: 50,
+        });
+        let f1 = dummy_frame(100);
+        let mut frames = AnimationFrames::new(vec![f0, f1], false, 0);
+        let s = frames.current_frame_sound().expect("should be Some");
+        assert_eq!(s.number, Some(3));
+        assert_eq!(s.delay_ms, 50);
+        // 次 frame に進むと None。
+        frames.current = 1;
+        assert!(frames.current_frame_sound().is_none());
+    }
+
+    #[test]
+    fn current_frame_sound_empty_frames_returns_none() {
+        let frames = AnimationFrames::new(vec![], false, 0);
+        assert!(frames.current_frame_sound().is_none());
     }
 }

@@ -12,9 +12,9 @@
 
 現状保持される項目:
 
-- テーマ (`emerald` / `dark`、既定は `dark`)
+- テーマ (`emerald` / `dark`、既定は `emerald`)
 - Level 編集の view controls / zoom step
-- Level 編集の undo/redo 履歴 capacity
+- Undo/Redo 履歴 capacity — SpriteGroup / Animation / Level の **3 種類が独立に持つ** (各 default 50 steps)
 - key bindings (エディタ内の `Edit Key Bindings` モーダルから編集可)
 
 ファイルが無いか壊れている場合は `Default::default()` でフォールバックする (fail-soft)。古い preferences.yml に新フィールドが欠けていても、`#[serde(default)]` で個別に補完される。

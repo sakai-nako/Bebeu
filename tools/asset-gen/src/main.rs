@@ -35,10 +35,48 @@ fn main() -> Result<()> {
         body: [0xC5, 0x2D, 0x2D, 0xFF],
         accent: [0x33, 0x33, 0x33, 0xFF],
     };
+    // ADR-0035 Phase 2: 味方 NPC (緑系) のプレースホルダー。hero (青) / enemy (赤) と
+    // 視認上区別しやすい色味で揃える。
+    let ally = CharacterPalette {
+        head: [0x7B, 0xD3, 0x8E, 0xFF],
+        body: [0x2E, 0x8B, 0x57, 0xFF],
+        accent: [0xFF, 0xE6, 0x82, 0xFF],
+    };
 
-    write_character(&out, "hero", &hero)?;
-    write_character(&out, "enemy", &enemy)?;
+    write_character(&out, "hero", &hero, true)?;
+    write_character(&out, "enemy", &enemy, false)?;
+    write_character(&out, "ally", &ally, false)?;
     write_level(&out, "training")?;
+    write_sound_placeholder(
+        &out,
+        "hero",
+        "attack_swing",
+        "attack_swing.wav",
+        WaveShape::Tone(880.0),
+    )?;
+    write_sound_placeholder(
+        &out,
+        "hero",
+        "attack_swing",
+        "attack_swing_low.wav",
+        WaveShape::Tone(660.0),
+    )?;
+    // ADR-0034: Hit / Guard 出し分け用のプレースホルダー (高めのトーン = ヒット感、
+    // 低めのトーン + 短い = ガード弾き感)。
+    write_sound_placeholder(
+        &out,
+        "hero",
+        "attack_hit",
+        "attack_hit.wav",
+        WaveShape::Tone(1320.0),
+    )?;
+    write_sound_placeholder(
+        &out,
+        "hero",
+        "attack_guard",
+        "attack_guard.wav",
+        WaveShape::Tone(440.0),
+    )?;
 
     println!("asset-gen: done");
     Ok(())
@@ -50,7 +88,12 @@ struct CharacterPalette {
     accent: Color,
 }
 
-fn write_character(root: &Path, name: &str, palette: &CharacterPalette) -> Result<()> {
+fn write_character(
+    root: &Path,
+    name: &str,
+    palette: &CharacterPalette,
+    with_player_icons: bool,
+) -> Result<()> {
     let base = root.join("data").join("characters").join(name);
     write_sprite(&base, "idle", 1, 0, palette)?;
     write_sprite(&base, "walk", 1, 0, palette)?;
@@ -83,6 +126,13 @@ fn write_character(root: &Path, name: &str, palette: &CharacterPalette) -> Resul
     // 中継 (次フレームで KnockbackUp に切り替わる)。
     write_sprite(&base, "guard", 1, 0, palette)?;
     write_sprite(&base, "guard_break", 1, 0, palette)?;
+    // Icon HUD (ADR-0033) 用の 3 sprite。Player キャラだけ生成する (= main.yml の
+    // hud.elements で参照される hero のみ。enemy 側は orphan PNG を生まないようにスキップ)。
+    if with_player_icons {
+        write_sprite(&base, "icons", 1, 0, palette)?;
+        write_sprite(&base, "icons", 2, 1, palette)?;
+        write_sprite(&base, "icons", 3, 2, palette)?;
+    }
     Ok(())
 }
 
@@ -113,6 +163,7 @@ fn write_sprite(
         "jump_attack" => render_jump_attack_sprite(palette, phase),
         "guard" => render_guard_sprite(palette),
         "guard_break" => render_guard_break_sprite(palette),
+        "icons" => render_icon_sprite(palette, phase),
         _ => render_character_sprite(palette, phase),
     };
     write_png(&path, SPRITE_W, SPRITE_H, &pixels)
@@ -357,6 +408,51 @@ fn render_guard_sprite(palette: &CharacterPalette) -> Vec<u8> {
     buf
 }
 
+/// HUD アイコン (ADR-0033) 用 sprite。HUD 側で 40x40 へ縮小して描画されるので、
+/// 中央寄せで顔のアップを描いて状態を見分けやすくする。
+/// phase 0 = idle (通常の顔)、phase 1 = attack (accent 色の眉 / 口で「ニッ」とした表情)、
+/// phase 2 = hit (頭が傾いて口が「×」のしかめ面)。
+fn render_icon_sprite(palette: &CharacterPalette, phase: u32) -> Vec<u8> {
+    let mut buf = vec![0u8; (SPRITE_W * SPRITE_H * 4) as usize];
+    // 中央に縦長の顔 (HUD 上では正方形に縮むので、sprite 内も正方形に近づける)。
+    let cx: i32 = 8;
+    let cy: i32 = 24;
+    let face_w: i32 = 32;
+    let face_h: i32 = 48;
+    fill_rect(&mut buf, cx, cy, face_w, face_h, palette.head);
+    match phase {
+        // idle: 目だけ。下半分に body 色のチンストラップ風帯。
+        0 => {
+            fill_rect(&mut buf, cx + 8, cy + 16, 4, 4, palette.body);
+            fill_rect(&mut buf, cx + 20, cy + 16, 4, 4, palette.body);
+            fill_rect(&mut buf, cx, cy + face_h - 6, face_w, 6, palette.body);
+        }
+        // attack: accent 色で吊り上がった眉と前傾の顔向きを表す。
+        1 => {
+            fill_rect(&mut buf, cx + 6, cy + 10, 8, 3, palette.accent);
+            fill_rect(&mut buf, cx + 18, cy + 10, 8, 3, palette.accent);
+            fill_rect(&mut buf, cx + 8, cy + 18, 4, 4, palette.body);
+            fill_rect(&mut buf, cx + 20, cy + 18, 4, 4, palette.body);
+            fill_rect(&mut buf, cx + 10, cy + 30, 12, 4, palette.accent);
+        }
+        // hit: 体ごとオフセットしたうえで accent 色で × を顔に重ねる。
+        _ => {
+            let dx: i32 = -4;
+            for y in 0..face_h {
+                for x in 0..face_w {
+                    let i = (((cy + y) as u32 * SPRITE_W + (cx + x) as u32) * 4) as usize;
+                    buf[i..i + 4].copy_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+            fill_rect(&mut buf, cx + dx, cy, face_w, face_h, palette.head);
+            fill_rect(&mut buf, cx + dx + 6, cy + 14, 4, 8, palette.accent);
+            fill_rect(&mut buf, cx + dx + 18, cy + 14, 4, 8, palette.accent);
+            fill_rect(&mut buf, cx + dx + 10, cy + 30, 8, 4, palette.body);
+        }
+    }
+    buf
+}
+
 /// `GuardBreak` 用 sprite (ADR-0028)。ガードが弾かれた瞬間: 腕が左右に弾けて
 /// 上体が後ろにのけぞる。1 frame しか出ない (次 frame で `KnockbackUp` に切り替わる)。
 fn render_guard_break_sprite(palette: &CharacterPalette) -> Vec<u8> {
@@ -449,5 +545,94 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
     encoder.set_depth(BitDepth::Eight);
     let mut writer = encoder.write_header()?;
     writer.write_image_data(rgba)?;
+    Ok(())
+}
+
+/// プレースホルダー sound を `data/characters/{character}/sound-groups/{group}/sounds/{basename}`
+/// に書き出す (ADR-0019)。120ms の極短 WAV で「鳴ったことが分かる」程度の挙動確認用。
+fn write_sound_placeholder(
+    root: &Path,
+    character: &str,
+    group: &str,
+    basename: &str,
+    shape: WaveShape,
+) -> Result<()> {
+    let dir = root
+        .join("data")
+        .join("characters")
+        .join(character)
+        .join("sound-groups")
+        .join(group)
+        .join("sounds");
+    fs::create_dir_all(&dir).with_context(|| format!("create_dir_all: {}", dir.display()))?;
+    let path = dir.join(basename);
+    let samples = render_wave_120ms(shape);
+    write_wav_mono16(&path, &samples).with_context(|| format!("write sound: {}", path.display()))
+}
+
+#[derive(Clone, Copy)]
+enum WaveShape {
+    /// 単純な sin (Hz)。鳴ったことが耳で分かる用途。
+    Tone(f32),
+}
+
+const WAV_SAMPLE_RATE: u32 = 22_050;
+const WAV_DURATION_MS: u32 = 120;
+
+fn render_wave_120ms(shape: WaveShape) -> Vec<i16> {
+    let total_samples = (WAV_SAMPLE_RATE * WAV_DURATION_MS) / 1000;
+    let mut buf = Vec::with_capacity(total_samples as usize);
+    match shape {
+        WaveShape::Tone(freq_hz) => {
+            // 軽い fade-in/out で耳に痛い click を避ける。
+            let attack = total_samples / 8;
+            let release = total_samples / 4;
+            let max_amplitude = f32::from(i16::MAX);
+            for i in 0..total_samples {
+                let t = i as f32 / WAV_SAMPLE_RATE as f32;
+                let s = (t * freq_hz * std::f32::consts::TAU).sin();
+                let envelope = if i < attack {
+                    i as f32 / attack as f32
+                } else if i > total_samples - release {
+                    (total_samples - i) as f32 / release as f32
+                } else {
+                    1.0
+                };
+                // 控えめな音量 (0.3) で書き出す。
+                let v = (s * envelope * 0.3 * max_amplitude) as i16;
+                buf.push(v);
+            }
+        }
+    }
+    buf
+}
+
+/// 22050Hz mono 16bit PCM の最小 WAV を書き出す。
+fn write_wav_mono16(path: &Path, samples: &[i16]) -> Result<()> {
+    use std::io::Write;
+    let data_bytes: u32 = (samples.len() * 2)
+        .try_into()
+        .context("WAV data length overflow")?;
+    let file = fs::File::create(path)?;
+    let mut w = std::io::BufWriter::new(file);
+    // RIFF header
+    w.write_all(b"RIFF")?;
+    w.write_all(&(36 + data_bytes).to_le_bytes())?;
+    w.write_all(b"WAVE")?;
+    // fmt chunk (PCM, mono, 22050Hz, 16bit)
+    w.write_all(b"fmt ")?;
+    w.write_all(&16u32.to_le_bytes())?; // fmt chunk size
+    w.write_all(&1u16.to_le_bytes())?; // PCM
+    w.write_all(&1u16.to_le_bytes())?; // mono
+    w.write_all(&WAV_SAMPLE_RATE.to_le_bytes())?;
+    w.write_all(&(WAV_SAMPLE_RATE * 2).to_le_bytes())?; // byte rate (sample_rate * block_align)
+    w.write_all(&2u16.to_le_bytes())?; // block align
+    w.write_all(&16u16.to_le_bytes())?; // bits per sample
+    // data chunk
+    w.write_all(b"data")?;
+    w.write_all(&data_bytes.to_le_bytes())?;
+    for &s in samples {
+        w.write_all(&s.to_le_bytes())?;
+    }
     Ok(())
 }

@@ -29,8 +29,9 @@ Levels live in the master pool at `<workspace_dir>/data/levels/`.
 | `player_spawn_z` | image Y (px) / `0` | initial Player spawn Z (base-image pixel Y = depth) |
 | `player_respawn_y` | height (px) / `0` | starting height for respawn on death (0 = revive on the ground; positive = drop from above) |
 | `opponent_triggers` | list / empty | enemy spawn schedule (see below) |
+| `gravity_scale` | multiplier / omitted (= 1.0) | Per-level gravity multiplier. Effective gravity = `Character.physics.gravity * gravity_scale` |
 
-Omitted fields are filled in with their defaults automatically. An empty `opponent_triggers` can be left out of the YAML.
+Omitted fields are filled in with their defaults automatically. An empty `opponent_triggers` and an omitted `gravity_scale` can both be left out of the YAML.
 
 ## Coordinate system: base-image pixel = world coordinate
 

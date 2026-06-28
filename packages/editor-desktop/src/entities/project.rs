@@ -2,8 +2,8 @@ mod model;
 pub use model::{
     EnemyHpBarConfig, EnemyOverheadHpBarConfig, EnemyTarget, FillDirection, GaugeStep, HexColor,
     Hud, HudAnchor, HudElement, HudElementAnchor, HudFrame, HudKindOption, HudOffset, HudSize,
-    OverheadVerticalAnchor, PlayerHpBarConfig, PlayerHpRingConfig, PlayerId, Project, Resolution,
-    RingDirection,
+    IconShakeConfig, IconShakeParams, OverheadVerticalAnchor, PlayerHpBarConfig,
+    PlayerHpRingConfig, PlayerIconConfig, PlayerId, Project, Resolution, RingDirection,
 };
 
 mod api;

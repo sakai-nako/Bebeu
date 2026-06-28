@@ -1,0 +1,6 @@
+name: attack_hit
+number: 2
+sounds:
+- index: 0
+  path: attack_hit.wav
+  volume: 0.7

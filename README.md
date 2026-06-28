@@ -33,8 +33,8 @@ verified on them yet. For platform-specific system packages, see:
 
 ```
 packages/
-  engine/          # Bevy-based runtime (binary: beatemup)
-  editor-desktop/  # Dioxus desktop editor for authoring projects
+  engine/          # Bevy-based runtime (binary: bebeu-engine)
+  editor-desktop/  # Dioxus desktop editor for authoring projects (binary: bebeu-editor-desktop)
 tools/
   asset-gen/       # CLI that writes the placeholder PNGs under sample-projects/
 sample-projects/
@@ -145,8 +145,8 @@ Pull Request は現状 invite 制で運用しているので、まず Issue を�
 
 ```
 packages/
-  engine/          # Bevy ベースの runtime (バイナリ: beatemup)
-  editor-desktop/  # プロジェクト編集用の Dioxus desktop エディタ
+  engine/          # Bevy ベースの runtime (バイナリ: bebeu-engine)
+  editor-desktop/  # プロジェクト編集用の Dioxus desktop エディタ (バイナリ: bebeu-editor-desktop)
 tools/
   asset-gen/       # sample-projects 配下のプレースホルダー PNG を書き出す CLI
 sample-projects/

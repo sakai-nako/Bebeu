@@ -11,7 +11,7 @@ pub fn entrypoint() {
     let window_config = Config::new()
         .with_window(
             WindowBuilder::new()
-                .with_title("Local Game Editor")
+                .with_title("Bebeu Editor")
                 .with_maximized(true)
                 .with_always_on_top(false),
         )

@@ -1,9 +1,9 @@
 [application]
-name = "Local GW Editor"
+name = "Bebeu Editor"
 
 [web.app]
 # HTML title tag content
-title = "Local GW Editor"
+title = "Bebeu Editor"
 
 # include `assets` in web platform
 [web.resource]

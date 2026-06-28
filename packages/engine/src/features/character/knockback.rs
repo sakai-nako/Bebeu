@@ -278,7 +278,7 @@ fn apply_friction_step(vel: f32, decel: f32, dt: f32) -> f32 {
 /// 吹っ飛び中 (空中 + Slide) と Jump / JumpAttack は `KinematicVel` を `WorldPosition` に
 /// 積分する。直前の `apply_gravity` / `apply_slide_friction` が当 frame の vel を更新して
 /// いるので、semi-implicit Euler になる。Idle/Walk 等は通常 movement system が触る。
-/// Jump / JumpAttack は X/Z 移動を handle_input 側が直接 `pos` に書く設計なので、ここでは
+/// Jump / JumpAttack は X/Z 移動を `super::ai::apply_command` 側が直接 `pos` に書く設計なので、ここでは
 /// `vel.vel_y` だけが意味を持つ (= 重力での落下)。`vel.vel_x` / `vel.vel_z` も加算は走るが、
 /// Jump 開始時に充填されていなければ 0 のまま。
 fn apply_velocity(
@@ -325,8 +325,8 @@ fn transition_at_apex(mut q: Query<(&mut CharacterState, &KinematicVel), Without
 /// ゼロなら **Slide** (vel_y を 0 にして地面を滑る) に分岐する。pos.y は 0 に clamp。
 ///
 /// Jump / JumpAttack 中で `y <= 0` (= 着地) のときは `Idle` に復帰し、`vel_y = 0` / `vel_x = 0`
-/// / `vel_z = 0` にリセットする (ADR-0027)。空中での X/Z 移動は `handle_input` が直接 `pos` に
-/// 書いているので vel は基本 0 のままだが、念のためここでクリアする。
+/// / `vel_z = 0` にリセットする (ADR-0027)。空中での X/Z 移動は `super::ai::apply_command` が
+/// 直接 `pos` に書いているので vel は基本 0 のままだが、念のためここでクリアする。
 fn detect_landing(
     mut q: Query<
         (

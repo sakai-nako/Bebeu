@@ -21,3 +21,13 @@ physics:
     vel_x: 100.0
     vel_y: 150.0
     vel_z: 0.0
+# ADR-0035 Phase 1.2: 近接 AI Brain。値は Phase 1.1 で hard-code していた MeleeConfig::default() と同等。
+ai:
+  kind: melee
+  chase_enter_range_px: 200.0
+  chase_exit_range_px: 240.0
+  attack_enter_range_px: 28.0
+  attack_exit_range_px: 36.0
+  attack_cooldown_ticks: 60
+  decision_interval_ticks: 6
+  min_dwell_ticks: 8

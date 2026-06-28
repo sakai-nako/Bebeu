@@ -1,0 +1,10 @@
+name: attack_swing
+number: 1
+sounds:
+- index: 0
+  path: attack_swing.wav
+  volume: 0.6
+- index: 1
+  path: attack_swing_low.wav
+  volume: 0.6
+  weight: 2.0

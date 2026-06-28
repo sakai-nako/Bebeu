@@ -1185,7 +1185,9 @@ fn filesystem_persists_frame_sound_field() -> Result<()> {
     let mut anim = sample_animation("hit");
     let mut f = sample_frame(0, 200);
     f.sound = Some(FrameSound {
-        number: 5000,
+        number: Some(5000),
+        on_hit: None,
+        on_guard: None,
         delay_ms: 120,
     });
     anim.frames.push(f);
@@ -1206,7 +1208,9 @@ fn filesystem_persists_frame_sound_field() -> Result<()> {
     assert_eq!(
         loaded.frames[0].sound,
         Some(FrameSound {
-            number: 5000,
+            number: Some(5000),
+            on_hit: None,
+            on_guard: None,
             delay_ms: 120,
         })
     );

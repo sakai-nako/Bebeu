@@ -10,6 +10,8 @@ frames:
   pivot_point_offset: null
   body_box_overrides: null
   attack_box_overrides: null
+  sound:
+    number: 1
   layers:
   - index: 0
     sprite_group_number: 3
@@ -36,6 +38,9 @@ frames:
         shake_y: 0
         count: 5
         decay: 0.0
+  sound:
+    on_hit: 2
+    on_guard: 3
   layers:
   - index: 0
     sprite_group_number: 3

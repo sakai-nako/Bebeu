@@ -5,16 +5,17 @@
 //! 矩形は box の (center_x ± half_x, center_y ± half_y) の 4 角を取り、Z の影響は
 //! `projection::world_to_bevy_f32` に任せて Bevy Y の縦シフトに変換する。
 //!
-//! AttackBox は [`is_attack_hit_active`] が true な player frame のときだけ赤で描く。
-//! BodyBox は常時緑で描く。色はとりあえず固定 (デバッグ用、将来 invincibility 表現を
-//! 入れるなら state 別に塗り分ける余地あり)。
+//! AttackBox は [`is_attack_hit_active`] が true な attacker frame のときだけ赤で描く。
+//! ADR-0036: attacker は Player / Enemy どちらも対象 (= `AttackHitConsumed` を持つ
+//! entity 全て)。BodyBox は常時緑で描く。色はとりあえず固定 (デバッグ用、将来
+//! invincibility 表現を入れるなら state 別に塗り分ける余地あり)。
 use bevy::prelude::*;
 
 use crate::shared::projection::{self, world_box_from_hitbox};
 
 use super::animation::{AnimationFrames, AnimationSet};
-use super::attack::{AttackBox, BodyBox, CharacterDepth, is_attack_hit_active};
-use super::movement::{Enemy, Facing, Player, WorldPosition};
+use super::attack::{AttackBox, AttackHitConsumed, BodyBox, CharacterDepth, is_attack_hit_active};
+use super::movement::{Facing, WorldPosition};
 use super::state_machine::CharacterState;
 
 const BODY_COLOR: Color = Color::srgb(0.3, 1.0, 0.4);
@@ -56,7 +57,9 @@ fn draw_hitboxes(
     enabled: Res<HitboxDebugEnabled>,
     mut gizmos: Gizmos,
     body_query: Query<&BodyBox>,
-    player_query: Query<
+    // ADR-0036: attacker は Player / Enemy 両方。`AttackHitConsumed` を持つ entity 全てを
+    // 拾えば marker による分岐は不要 (= 両 marker で spawn 時に attach されている)。
+    attacker_query: Query<
         (
             &WorldPosition,
             &Facing,
@@ -64,7 +67,7 @@ fn draw_hitboxes(
             &AnimationFrames,
             &CharacterDepth,
         ),
-        (With<Player>, Without<Enemy>),
+        With<AttackHitConsumed>,
     >,
 ) {
     if !enabled.0 {
@@ -86,11 +89,12 @@ fn draw_hitboxes(
             color,
         );
     }
-    for (pos, facing, state, anim, depth) in &player_query {
+    for (pos, facing, state, anim, depth) in &attacker_query {
         if !is_attack_hit_active(*state, anim) {
             continue;
         }
-        // resolve_hits と同じ AttackBox 計算 (YAML 駆動)。geom が無いときは fallback。
+        // resolve_player_attacks / resolve_enemy_attacks と同じ AttackBox 計算 (YAML 駆動)。
+        // geom が無いときは fallback。
         let ab = anim.current_attack_box_geom().map_or_else(
             || AttackBox::from_attacker(*pos, *facing),
             |geom| {

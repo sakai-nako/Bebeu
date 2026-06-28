@@ -19,13 +19,15 @@ use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
 use crate::app::SceneState;
+use crate::entities::character::Role;
 use crate::entities::project::{
     EnemyHpBarConfig, EnemyOverheadHpBarConfig, EnemyTarget, FillDirection, GaugeStep, HudAnchor,
-    HudElement, HudElementAnchor, HudOffset, HudSize, OverheadVerticalAnchor, PlayerHpBarConfig,
-    PlayerHpRingConfig, Project, RingDirection,
+    HudElement, HudElementAnchor, HudOffset, HudSize, IconShakeParams, OverheadVerticalAnchor,
+    PlayerHpBarConfig, PlayerHpRingConfig, PlayerIconConfig, Project, RingDirection,
 };
 use crate::features::character::{
-    AnimationFrames, Enemy, EnemyTag, HitPoints, LastEngagedWith, MainCamera, Player,
+    AnimationFrames, CharacterState, EnemyTag, HitPoints, HitStopState, LastEngagedWith,
+    MainCamera, PlayerSpriteGroupRegistry, Side,
 };
 use crate::shared::PlayerId;
 
@@ -52,6 +54,11 @@ impl Plugin for HudPlugin {
                     // 既存 bar の更新を分けて回す。spawn は `Added<Enemy>` で 1 度だけ走る。
                     spawn_enemy_overhead_hp_bars,
                     update_enemy_overhead_hp_bar,
+                    // ADR-0033: Player の CharacterState → sprite swap、HP 減 / attack hit → 振動。
+                    update_player_icon_sprite,
+                    detect_icon_damage,
+                    detect_icon_attack_hit,
+                    tick_icon_shake,
                 )
                     .run_if(in_state(SceneState::Battle)),
             );
@@ -123,11 +130,14 @@ struct EnemyOverheadHpBarGauge {
     fill_direction: FillDirection,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_hud(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     project: Option<Res<Project>>,
+    sprite_registry: Option<Res<PlayerSpriteGroupRegistry>>,
     camera_query: Query<Entity, With<MainCamera>>,
-    player_query: Query<(&Player, &HitPoints)>,
+    player_query: Query<(&PlayerId, &HitPoints)>,
     existing: Query<(), With<HudRoot>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -180,7 +190,7 @@ fn spawn_hud(
         // kind ごとに target を解決して spawn。
         let root_entity = match element {
             HudElement::PlayerHpBar(cfg) => {
-                let Some((_, hp)) = player_query.iter().find(|(p, _)| p.0 == cfg.target) else {
+                let Some((_, hp)) = player_query.iter().find(|(p, _)| **p == cfg.target) else {
                     tracing::warn!(target = ?cfg.target, "hud: target player not present, skipping element");
                     continue;
                 };
@@ -193,7 +203,7 @@ fn spawn_hud(
                 ))
             }
             HudElement::PlayerHpRing(cfg) => {
-                let Some((_, hp)) = player_query.iter().find(|(p, _)| p.0 == cfg.target) else {
+                let Some((_, hp)) = player_query.iter().find(|(p, _)| **p == cfg.target) else {
                     tracing::warn!(target = ?cfg.target, "hud: target player not present, skipping element");
                     continue;
                 };
@@ -213,6 +223,27 @@ fn spawn_hud(
                 root_translation,
                 cfg,
             )),
+            HudElement::PlayerIcon(cfg) => {
+                let Some(registry) = sprite_registry.as_ref() else {
+                    tracing::warn!(
+                        "hud: PlayerSpriteGroupRegistry resource missing, skipping player_icon"
+                    );
+                    continue;
+                };
+                let Some(player_groups) = registry.get(cfg.target) else {
+                    tracing::warn!(target = ?cfg.target, "hud: no sprite groups registered for player, skipping player_icon");
+                    continue;
+                };
+                spawn_player_icon(
+                    &mut commands,
+                    &asset_server,
+                    parent_entity,
+                    root_translation,
+                    cfg,
+                    player_groups,
+                    &player_query,
+                )
+            }
             HudElement::EnemyOverheadHpBar(_) => {
                 // ADR-0032: world-anchored は spawn_enemy_overhead_hp_bars が `Added<Enemy>` 経路で
                 // per-enemy attach する。screen-anchor 経路では何もしない。
@@ -288,11 +319,11 @@ fn despawn_hud(mut commands: Commands, roots: Query<Entity, With<HudRoot>>) {
 }
 
 fn update_player_hp_bar(
-    player_query: Query<(&Player, &HitPoints)>,
+    player_query: Query<(&PlayerId, &HitPoints)>,
     mut gauges: Query<(&mut Sprite, &PlayerHpBarGauge)>,
 ) {
     for (mut sprite, gauge) in &mut gauges {
-        let Some((_, hp)) = player_query.iter().find(|(p, _)| p.0 == gauge.target) else {
+        let Some((_, hp)) = player_query.iter().find(|(p, _)| **p == gauge.target) else {
             continue;
         };
         let current = hp.current as f32;
@@ -577,7 +608,7 @@ fn top_left_of_element(anchor: HudAnchor, offset: HudOffset, viewport: (f32, f32
 }
 
 fn update_player_hp_ring(
-    player_query: Query<(&Player, &HitPoints), Changed<HitPoints>>,
+    player_query: Query<(&PlayerId, &HitPoints), Changed<HitPoints>>,
     gauges: Query<(&PlayerHpRingGauge, &Mesh2d)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
@@ -587,7 +618,7 @@ fn update_player_hp_ring(
     for (player, hp) in &player_query {
         let current = hp.current as f32;
         for (gauge, mesh2d) in &gauges {
-            if gauge.target != player.0 {
+            if gauge.target != *player {
                 continue;
             }
             let denom = gauge.hp_high - gauge.hp_low;
@@ -856,8 +887,10 @@ fn build_annular_sector_mesh(outer_r: f32, inner_r: f32, start_rad: f32, end_rad
 /// 子の gauge sprite は HudRoot 配下に 1 個だけ (Phase 2 仕様)。
 fn update_enemy_hp_bar(
     mut roots: Query<(&EnemyHpBarRoot, &Children, &mut Visibility)>,
-    enemy_query: Query<(Entity, Option<&EnemyTag>, &HitPoints), With<Enemy>>,
-    player_query: Query<(&Player, &LastEngagedWith)>,
+    // ADR-0038: 旧 `With<Enemy>` は `&Side` 値判定で `Side::Villain` 限定に置換 (= 旧 Enemy
+    // entity と等価)。Hero side の HUD 起点は別 query (player_query / PlayerId 引き)。
+    enemy_query: Query<(Entity, Option<&EnemyTag>, &HitPoints, &Side)>,
+    player_query: Query<(&PlayerId, &LastEngagedWith)>,
     mut gauges: Query<(&EnemyHpBarGauge, &mut Sprite)>,
 ) {
     for (root, children, mut visibility) in &mut roots {
@@ -895,39 +928,43 @@ fn update_enemy_hp_bar(
     }
 }
 
-/// `EnemyTarget` を現状の Enemy 群から resolve し、(entity, hp) を返す。
+/// `EnemyTarget` を現状の Villain (= 旧 Enemy) 群から resolve し、(entity, hp) を返す。
 /// 該当が無ければ `None`。複数候補がある場合は最初に見つかったものを採用 (Bevy の
-/// query iteration 順、entity 生成順に近い)。
+/// query iteration 順、entity 生成順に近い)。ADR-0038: `&Side` 値判定で Villain 限定。
 fn resolve_enemy_target<'w>(
     target: &EnemyTarget,
-    enemy_query: &'w Query<(Entity, Option<&EnemyTag>, &HitPoints), With<Enemy>>,
-    player_query: &Query<(&Player, &LastEngagedWith)>,
+    enemy_query: &'w Query<(Entity, Option<&EnemyTag>, &HitPoints, &Side)>,
+    player_query: &Query<(&PlayerId, &LastEngagedWith)>,
 ) -> Option<(Entity, &'w HitPoints)> {
+    let villains = || {
+        enemy_query
+            .iter()
+            .filter(|(_, _, _, s)| matches!(s, Side::Villain))
+    };
     match target {
         EnemyTarget::LastEngagedBy(pid) => {
-            let (_, last) = player_query.iter().find(|(p, _)| p.0 == *pid)?;
+            let (_, last) = player_query.iter().find(|(p, _)| **p == *pid)?;
             let target_entity = last.0?;
-            enemy_query
-                .iter()
-                .find(|(e, _, _)| *e == target_entity)
-                .map(|(e, _, hp)| (e, hp))
+            villains()
+                .find(|(e, _, _, _)| *e == target_entity)
+                .map(|(e, _, hp, _)| (e, hp))
         }
-        EnemyTarget::Tag(tag) => enemy_query
-            .iter()
-            .find(|(_, t, _)| t.is_some_and(|t| t.0 == *tag))
-            .map(|(e, _, hp)| (e, hp)),
-        EnemyTarget::NthEnemy(n) => enemy_query.iter().nth(*n).map(|(e, _, hp)| (e, hp)),
+        EnemyTarget::Tag(tag) => villains()
+            .find(|(_, t, _, _)| t.is_some_and(|t| t.0 == *tag))
+            .map(|(e, _, hp, _)| (e, hp)),
+        EnemyTarget::NthEnemy(n) => villains().nth(*n).map(|(e, _, hp, _)| (e, hp)),
     }
 }
 
-/// ADR-0032: Enemy が新規に登場したとき (`Added<Enemy>`)、project.hud.elements の中で
-/// `enemy_overhead_hp_bar` に該当する config を全部走査し、`tag_filter` に合致するものを
-/// 各 Enemy entity の child として spawn する。Enemy が despawn されると Bevy hierarchy で
-/// 子もまとめて消える。
+/// ADR-0032 / ADR-0038: Villain entity が新規に登場したとき (`Added<Side>` + `Side::Villain`
+/// 値判定)、project.hud.elements の中で `enemy_overhead_hp_bar` に該当する config を全部走査
+/// し、`tag_filter` に合致するものを各 Villain entity の child として spawn する。Villain が
+/// despawn されると Bevy hierarchy で子もまとめて消える。
+/// `Added<Side>` は Hero spawn でも発火するが、内側の `matches!(side, Side::Villain)` で skip。
 fn spawn_enemy_overhead_hp_bars(
     mut commands: Commands,
     project: Option<Res<Project>>,
-    new_enemies: Query<(Entity, Option<&EnemyTag>, &AnimationFrames), Added<Enemy>>,
+    new_enemies: Query<(Entity, Option<&EnemyTag>, &AnimationFrames, &Side), Added<Side>>,
 ) {
     let Some(project) = project else {
         return;
@@ -948,9 +985,12 @@ fn spawn_enemy_overhead_hp_bars(
         return;
     }
 
-    for (enemy_entity, tag, anim) in &new_enemies {
+    for (enemy_entity, tag, anim, side) in &new_enemies {
+        if !matches!(side, Side::Villain) {
+            continue;
+        }
         for cfg in &overhead_cfgs {
-            // tag_filter が Some なら EnemyTag が一致するときだけ attach。None なら全 enemy。
+            // tag_filter が Some なら EnemyTag が一致するときだけ attach。None なら全 villain。
             if let Some(filter) = &cfg.tag_filter {
                 let matches = tag.is_some_and(|t| t.0 == *filter);
                 if !matches {
@@ -1060,14 +1100,20 @@ fn spawn_overhead_bar(
 /// Enemy が既に despawn されていたら Bevy hierarchy で root も既に消えているはずだが、
 /// 念のため query.get で None を skip する。
 fn update_enemy_overhead_hp_bar(
-    enemy_query: Query<(&HitPoints, &AnimationFrames), With<Enemy>>,
+    // ADR-0038: 旧 `With<Enemy>` は `&Side` 値判定で Villain 限定。`enemy_query.get(...)` で
+    // 引いた entity が Hero side だった場合 (= overhead bar attach されない想定だが念のため)
+    // は skip する。
+    enemy_query: Query<(&HitPoints, &AnimationFrames, &Side)>,
     mut roots: Query<(&EnemyOverheadHpBarRoot, &mut Transform, &Children)>,
     mut gauges: Query<(&EnemyOverheadHpBarGauge, &mut Sprite)>,
 ) {
     for (root, mut transform, children) in &mut roots {
-        let Ok((hp, anim)) = enemy_query.get(root.enemy) else {
+        let Ok((hp, anim, vic_side)) = enemy_query.get(root.enemy) else {
             continue;
         };
+        if !matches!(vic_side, Side::Villain) {
+            continue;
+        }
         // Y を毎 frame 再計算 (sprite 形状が変わると image_top/bottom が動くため)。
         let new_y = overhead_local_y(root.vertical_anchor, root.offset_y, anim);
         if (transform.translation.y - new_y).abs() > f32::EPSILON {
@@ -1097,6 +1143,296 @@ fn update_enemy_overhead_hp_bar(
                 }
             }
         }
+    }
+}
+
+/// PlayerIcon の root marker (ADR-0033)。CharacterState 変化で sprite を hot swap するための
+/// `icons_by_role` map と shake trigger / params を保持する。
+///
+/// `last_hp` は `detect_icon_damage` が「current HP が前 frame より減ったか」を判定するために
+/// 直前 frame の値を覚えるための一時変数。spawn 時に Player の現 HP で初期化する。
+#[derive(Component)]
+struct PlayerIconRoot {
+    target: PlayerId,
+    icons_by_role: HashMap<Role, Handle<Image>>,
+    default_handle: Handle<Image>,
+    on_damage: Option<IconShakeParams>,
+    on_attack_hit: Option<IconShakeParams>,
+    last_hp: u32,
+}
+
+/// PlayerIcon の中央 sprite (= 実際に Image を表示する子)。state 切替の対象。
+#[derive(Component)]
+struct PlayerIconSprite;
+
+/// 振動中の Icon root に attach される component (ADR-0033)。
+/// HitStop と同じ三角波 + 線形減衰モデル。`base_translation` は shake offset 適用前の
+/// root.translation (= spawn 時の位置)。tick_icon_shake が毎 frame `base + offset` で
+/// Transform を上書きする。
+#[derive(Component, Clone, Copy)]
+struct IconShakeState {
+    total_ms: u32,
+    remaining_ms: f32,
+    shake_x: i32,
+    shake_y: i32,
+    count: u32,
+    decay: f32,
+    base_translation: Vec3,
+}
+
+impl IconShakeState {
+    fn from_params(params: IconShakeParams, base_translation: Vec3) -> Self {
+        Self {
+            total_ms: params.duration_ms,
+            remaining_ms: params.duration_ms as f32,
+            shake_x: params.shake_x,
+            shake_y: params.shake_y,
+            count: params.count,
+            decay: params.decay,
+            base_translation,
+        }
+    }
+}
+
+/// PlayerIcon の root + frame + bg + 中央 sprite を spawn する (ADR-0033)。
+///
+/// state_sprites の各 Role について sprite_index を引いて asset_server で Image を pre-load し、
+/// PlayerIconRoot の icons_by_role に貯める。CharacterState 変化時の sprite swap は
+/// `update_player_icon_sprite` が icons_by_role から該当 Role の handle を引き直して
+/// 子 sprite の image を差し替える (Image 自体は事前 load 済みなので IO 無し)。
+///
+/// 該当 sprite_group_number が見つからない / sprite_index が group 内に存在しない場合は warn
+/// を出して該当 Role を skip する。default_handle だけ確実に取れていれば icon は表示される。
+#[allow(clippy::too_many_arguments)]
+fn spawn_player_icon(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    parent: Entity,
+    root_translation: Vec3,
+    cfg: &PlayerIconConfig,
+    player_groups: &crate::features::character::PlayerSpriteGroups,
+    player_query: &Query<(&PlayerId, &HitPoints)>,
+) -> Option<Entity> {
+    let outer_size = Vec2::new(cfg.size.w, cfg.size.h);
+    let frame_t = cfg.frame.thickness.max(0.0);
+    let inner_size = Vec2::new(
+        (cfg.size.w - 2.0 * frame_t).max(0.0),
+        (cfg.size.h - 2.0 * frame_t).max(0.0),
+    );
+
+    let Some(group) = player_groups.sprite_groups.get(&cfg.sprite_group_number) else {
+        tracing::warn!(
+            target = ?cfg.target,
+            sprite_group_number = cfg.sprite_group_number,
+            "hud: sprite_group_number not found in player's sprite_groups, skipping player_icon",
+        );
+        return None;
+    };
+    let load_handle = |sprite_index: u32| -> Option<Handle<Image>> {
+        let sprite = group.sprites.iter().find(|s| s.index == sprite_index)?;
+        let asset_rel = format!(
+            "characters/{}/sprite-groups/{}/sprites/{}",
+            player_groups.character_name, group.name, sprite.path,
+        );
+        Some(asset_server.load(asset_rel))
+    };
+    let Some(default_handle) = load_handle(cfg.default_sprite_index) else {
+        tracing::warn!(
+            target = ?cfg.target,
+            sprite_group_number = cfg.sprite_group_number,
+            default_sprite_index = cfg.default_sprite_index,
+            "hud: default_sprite_index not found in sprite group, skipping player_icon",
+        );
+        return None;
+    };
+    let mut icons_by_role: HashMap<Role, Handle<Image>> = HashMap::new();
+    for (role, sprite_index) in &cfg.state_sprites {
+        let Some(handle) = load_handle(*sprite_index) else {
+            tracing::warn!(
+                ?role,
+                sprite_index,
+                group = %group.name,
+                "hud: sprite_index not found in icon sprite group, falling back to default",
+            );
+            continue;
+        };
+        icons_by_role.insert(*role, handle);
+    }
+
+    let initial_hp = player_query
+        .iter()
+        .find(|(p, _)| **p == cfg.target)
+        .map_or(0, |(_, hp)| hp.current);
+
+    let root = commands
+        .spawn((
+            HudRoot,
+            PlayerIconRoot {
+                target: cfg.target,
+                icons_by_role,
+                default_handle: default_handle.clone(),
+                on_damage: cfg.shake.on_damage,
+                on_attack_hit: cfg.shake.on_attack_hit,
+                last_hp: initial_hp,
+            },
+            Transform::from_translation(root_translation),
+            Visibility::default(),
+            ChildOf(parent),
+        ))
+        .id();
+
+    if frame_t > 0.0 {
+        commands.spawn((
+            Sprite::from_color(Color::from(cfg.frame.color), outer_size),
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            ChildOf(root),
+        ));
+    }
+    // bg は Icon 用途では default 完全透明 (= 描かない見た目) だが、bg_color を設定すれば
+    // sprite の後ろに塗れる。HP bar と同じ TOP_LEFT 基準で inner を埋める。
+    if cfg.bg_color.a > 0 {
+        commands.spawn((
+            Sprite::from_color(Color::from(cfg.bg_color), inner_size),
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(frame_t, -frame_t, 0.1),
+            ChildOf(root),
+        ));
+    }
+
+    // Icon 本体 (中央配置)。custom_size で size に fit させて、画像の素サイズに依らず
+    // 同じ HUD 寸法を保つ。
+    let icon_pos = Vec3::new(cfg.size.w * 0.5, -cfg.size.h * 0.5, 0.2);
+    commands.spawn((
+        Sprite {
+            image: default_handle,
+            custom_size: Some(inner_size),
+            ..default()
+        },
+        Anchor::CENTER,
+        Transform::from_translation(icon_pos),
+        PlayerIconSprite,
+        ChildOf(root),
+    ));
+
+    Some(root)
+}
+
+/// Player の CharacterState が変化したら、icons_by_role から該当 Role の Image handle を
+/// 引いて子 sprite の image を差し替える。state_sprites に未登録の Role は default_handle に
+/// フォールバックする。
+fn update_player_icon_sprite(
+    roots: Query<(&PlayerIconRoot, &Children)>,
+    player_query: Query<(&PlayerId, &CharacterState), Changed<CharacterState>>,
+    mut sprites: Query<&mut Sprite, With<PlayerIconSprite>>,
+) {
+    for (player, state) in &player_query {
+        let role = state.to_role();
+        for (root, children) in &roots {
+            if root.target != *player {
+                continue;
+            }
+            let handle = root
+                .icons_by_role
+                .get(&role)
+                .unwrap_or(&root.default_handle)
+                .clone();
+            for child in children.iter() {
+                if let Ok(mut sprite) = sprites.get_mut(child) {
+                    sprite.image = handle.clone();
+                }
+            }
+        }
+    }
+}
+
+/// 各 PlayerIconRoot について、target Player の HitPoints の current が前 frame より
+/// 減っていたら on_damage の振動を発火する。`last_hp` を毎 frame 更新する。
+fn detect_icon_damage(
+    mut commands: Commands,
+    mut roots: Query<(Entity, &mut PlayerIconRoot, &Transform)>,
+    player_query: Query<(&PlayerId, &HitPoints)>,
+) {
+    for (entity, mut root, transform) in &mut roots {
+        let Some((_, hp)) = player_query.iter().find(|(p, _)| **p == root.target) else {
+            continue;
+        };
+        if hp.current < root.last_hp
+            && let Some(params) = root.on_damage
+        {
+            commands
+                .entity(entity)
+                .insert(IconShakeState::from_params(params, transform.translation));
+        }
+        root.last_hp = hp.current;
+    }
+}
+
+/// Player に HitStopState が新規 attach された瞬間 (= attack が hit を出した瞬間、
+/// attack.rs の resolve_hits が attacker(...) で attach) を Added で拾い、
+/// 対応する PlayerIconRoot に on_attack_hit の振動を仕込む。
+fn detect_icon_attack_hit(
+    mut commands: Commands,
+    roots: Query<(Entity, &PlayerIconRoot, &Transform)>,
+    new_hit: Query<&PlayerId, Added<HitStopState>>,
+) {
+    for player in &new_hit {
+        for (entity, root, transform) in &roots {
+            if root.target != *player {
+                continue;
+            }
+            let Some(params) = root.on_attack_hit else {
+                continue;
+            };
+            commands
+                .entity(entity)
+                .insert(IconShakeState::from_params(params, transform.translation));
+        }
+    }
+}
+
+/// IconShakeState が attach されている root について、HitStop と同じ三角波 + 線形減衰で
+/// Transform.translation に offset を載せる。remaining が 0 を切ったら component を remove し、
+/// base_translation に戻す。
+fn tick_icon_shake(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut shaking: Query<(Entity, &mut IconShakeState, &mut Transform)>,
+) {
+    let dt_ms = time.delta_secs() * 1000.0;
+    for (entity, mut state, mut transform) in &mut shaking {
+        let (off_x, off_y) = if state.count > 0 && state.total_ms > 0 {
+            let progress = (1.0 - state.remaining_ms / state.total_ms as f32).clamp(0.0, 1.0);
+            let phase = progress * (state.count as f32) * 0.25;
+            let wave = icon_triangle_wave(phase);
+            let amp = (1.0 - state.decay * progress).clamp(0.0, 1.0);
+            (
+                wave * (state.shake_x as f32) * amp,
+                wave * (state.shake_y as f32) * amp,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        transform.translation = state.base_translation + Vec3::new(off_x, off_y, 0.0);
+        state.remaining_ms -= dt_ms;
+        if state.remaining_ms <= 0.0 {
+            transform.translation = state.base_translation;
+            commands.entity(entity).remove::<IconShakeState>();
+        }
+    }
+}
+
+/// 三角波 (周期 1)。hit_stop の triangle_wave と同じ。Icon HUD は別 slice に閉じて持ちたいので
+/// 共通化はせず、必要になってから DRY を検討する (CLAUDE.md「先に共通基盤を作らない」)。
+#[must_use]
+fn icon_triangle_wave(x: f32) -> f32 {
+    let frac = x - x.floor();
+    if frac < 0.25 {
+        frac * 4.0
+    } else if frac < 0.75 {
+        2.0 - frac * 4.0
+    } else {
+        frac * 4.0 - 4.0
     }
 }
 
@@ -1299,6 +1635,36 @@ mod tests {
         );
         let span = (segs[0].end_rad - segs[0].start_rad).abs().to_degrees();
         assert!((span - 86.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn icon_triangle_wave_matches_hit_stop_quarters() {
+        // ADR-0033: hit_stop の triangle_wave と同じ波形 (x=0→0, 0.25→1, 0.5→0, 0.75→-1, 1→0)。
+        assert!((icon_triangle_wave(0.0) - 0.0).abs() < 1e-6);
+        assert!((icon_triangle_wave(0.25) - 1.0).abs() < 1e-6);
+        assert!((icon_triangle_wave(0.5) - 0.0).abs() < 1e-6);
+        assert!((icon_triangle_wave(0.75) - (-1.0)).abs() < 1e-6);
+        assert!((icon_triangle_wave(1.0) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn icon_shake_state_from_params_copies_fields_and_seeds_remaining() {
+        let params = IconShakeParams {
+            duration_ms: 120,
+            shake_x: 3,
+            shake_y: 5,
+            count: 4,
+            decay: 0.5,
+        };
+        let base = Vec3::new(10.0, -20.0, 30.0);
+        let s = IconShakeState::from_params(params, base);
+        assert_eq!(s.total_ms, 120);
+        assert!((s.remaining_ms - 120.0).abs() < 1e-6);
+        assert_eq!(s.shake_x, 3);
+        assert_eq!(s.shake_y, 5);
+        assert_eq!(s.count, 4);
+        assert!((s.decay - 0.5).abs() < 1e-6);
+        assert_eq!(s.base_translation, base);
     }
 
     #[test]

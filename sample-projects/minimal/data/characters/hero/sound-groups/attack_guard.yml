@@ -1,0 +1,6 @@
+name: attack_guard
+number: 3
+sounds:
+- index: 0
+  path: attack_guard.wav
+  volume: 0.7

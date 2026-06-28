@@ -98,6 +98,19 @@ impl RuntimePaths {
             .join(sprite)
     }
 
+    /// sound-group 内の個別 wav ファイル (ADR-0019)
+    /// (`runtime/data/characters/{character}/sound-groups/{group}/sounds/{sound}`)。
+    pub fn sound_file(&self, character: &str, group: &str, sound: &str) -> PathBuf {
+        self.root
+            .join("data")
+            .join("characters")
+            .join(character)
+            .join("sound-groups")
+            .join(group)
+            .join("sounds")
+            .join(sound)
+    }
+
     /// Bevy `AssetServer` のルートとして使うディレクトリ。
     ///
     /// editor が生成する sprite-groups や thumbnail は `runtime/data/characters/{name}/...`

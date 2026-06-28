@@ -10,16 +10,17 @@ use bevy::sprite::Anchor;
 
 use crate::app::{PixelPerfectTarget, SceneState};
 use crate::entities::character::{
-    Animation, AttackBox, AttackBoxMeta, AttackBoxOverride, Character, Frame, HitBox, Role,
-    SpriteEntry, SpriteGroup,
+    AiConfig, Animation, AttackBox, AttackBoxMeta, AttackBoxOverride, Character, Frame, HitBox,
+    Role, SpriteEntry, SpriteGroup,
 };
 use crate::entities::level::{Level, OpponentTrigger};
 use crate::entities::project::Project;
 use crate::features::character::{
-    AnimationData, AnimationFrames, AttackHitConsumed, BodyBox, CharacterDepth, CharacterState,
-    Combatant, Enemy, EnemyAnimationSet, EnemyTag, Facing, FrameRender, HitPoints, KinematicVel,
-    LastEngagedWith, MainCamera, PhysicsParams, Player, PlayerAnimationLibrary, SimulationSet,
-    VSYNC_TICK, WorldPosition,
+    AiCommand, AllyBrain, AnimationData, AnimationFrames, AttackHitConsumed, AttackOutcome,
+    BodyBox, BotBrain, CharacterDepth, CharacterState, Combatant, Controller, EnemyAnimationSet,
+    EnemyTag, Facing, FrameRender, HitPoints, KinematicVel, LastEngagedWith, MainCamera,
+    MeleeBrain, MeleeConfig, PhysicsParams, PlayerAnimationLibrary, PlayerSpriteGroupRegistry,
+    Side, SimulationSet, SoundDispatch, VSYNC_TICK, WorldPosition, bake_character_sounds,
 };
 use crate::shared::PlayerId;
 use crate::shared::config::RuntimePaths;
@@ -217,9 +218,11 @@ fn setup(
             first_anchor,
             Transform::from_translation(player_translation),
             AnimationFrames::new(initial.frames, initial.is_loop, initial.loop_start_index),
-            // Phase 1 (ADR-0030): MVP は P1 だけ。multi-player は将来 project.players の
-            // 順序で P1..P4 を割り振る予定。
-            Player(PlayerId::P1),
+            // ADR-0038: Hero side + Human controller = 旧 Player marker と等価。
+            // bundle tuple 15 上限のため Side のみここで入れ、Controller / PlayerId は
+            // spawn 後 insert に流す (= 既存 LastEngagedWith / AiCommand と同方針)。
+            // Phase 1 (ADR-0030) の P1 only MVP は維持。
+            Side::Hero,
             CharacterState::default(),
             Facing::default(),
             player_pos,
@@ -238,14 +241,108 @@ fn setup(
             HitPoints::new(character.hp),
         ))
         .id();
-    // ADR-0031: engagement tracking。初期は誰とも engaged していない。bundle tuple の
-    // 15 上限を越えるので spawn 後に insert する。
-    commands
-        .entity(player_entity)
-        .insert(LastEngagedWith::default());
+    // ADR-0031: engagement tracking。初期は誰とも engaged していない。
+    // ADR-0035: AiCommand は PlayerInputController が毎 frame 上書きするので Default で
+    // 仮入れしておく。bundle tuple の 15 上限を越えるので spawn 後に insert する。
+    // ADR-0038: Controller::Human / PlayerId は Side::Hero と同 entity に attach (spawn
+    // 後 insert で 15 上限を回避)。
+    commands.entity(player_entity).insert((
+        LastEngagedWith::default(),
+        AiCommand::default(),
+        Controller::Human,
+        PlayerId::P1,
+    ));
+    // ADR-0019: Frame.sound dispatch 用の baked SoundGroup と pending スロット。
+    // ADR-0034 / ADR-0036: AttackOutcome は attacker 側 SE 出し分け用に attacker-agnostic に
+    // attach (Player にも Enemy にも入れる)。
+    commands.entity(player_entity).insert((
+        bake_character_sounds(&asset_server, player_name, &character),
+        SoundDispatch::default(),
+        AttackOutcome::default(),
+    ));
+
+    // ADR-0035 Phase 3 / ADR-0038 Phase 4: Player 自動化の発火経路は 2 つ:
+    //
+    // 1. env var `BEATEMUP_PLAYER_BOT` 非空 (Phase 3 既存) — sample-projects との相性が良い
+    //    切替方法。BEATEMUP_PROJECT / BEATEMUP_RUNTIME_DIR と同じ「非空で有効」規約。
+    // 2. hero character YAML の `ai: kind: bot` (Phase 4 新規) — character YAML レベルで
+    //    Controller を宣言したいとき用。`BotConfig` を持てるので Bot 専用 param の余地あり。
+    //
+    // **env var 優先 + 両立**: 両方指定された場合 env var 側が勝つ (= 既存挙動の回帰なし、
+    // ADR-0035 Phase 3 補追規約)。env が指定された場合は YAML の BotConfig より env 経路を
+    // 優先し、`MeleeConfig::default()` を使う (= Phase 3 の挙動を維持)。env なしで YAML が
+    // `ai: kind: bot` なら YAML 由来の `BotConfig` を `MeleeConfig` に詰め替えて使う。
+    //
+    // 排他 (= 手動入力 system との競合解決) は `player_input_controller` 側の
+    // `Without<BotBrain>` filter で担保 (Phase 3 案 A)。
+    let env_bot = std::env::var("BEATEMUP_PLAYER_BOT")
+        .ok()
+        .is_some_and(|v| !v.is_empty());
+    let yaml_bot_cfg: Option<MeleeConfig> = match &character.ai {
+        Some(AiConfig::Bot(cfg)) => Some(cfg.clone().into_melee_config()),
+        Some(AiConfig::Melee(_)) => {
+            tracing::warn!(
+                character = %character.name,
+                "battle: hero character has ai: kind: melee — ignored (only `bot` or null is supported on hero)",
+            );
+            None
+        }
+        Some(AiConfig::Ally(_)) => {
+            tracing::warn!(
+                character = %character.name,
+                "battle: hero character has ai: kind: ally — ignored (use project.allies entry, not players)",
+            );
+            None
+        }
+        None => None,
+    };
+    if env_bot || yaml_bot_cfg.is_some() {
+        // env 指定が優先: env_bot=true なら MeleeConfig::default()、それ以外なら YAML 由来。
+        let bot_cfg = if env_bot {
+            MeleeConfig::default()
+        } else {
+            yaml_bot_cfg.unwrap_or_default()
+        };
+        tracing::info!(
+            env = env_bot,
+            yaml = matches!(&character.ai, Some(AiConfig::Bot(_))),
+            "battle: attaching BotBrain to player",
+        );
+        // Controller::Ai で旧 Controller::Human を上書き (= 自動化に切り替え)。
+        commands
+            .entity(player_entity)
+            .insert((BotBrain::new(bot_cfg), Controller::Ai));
+    }
+
+    // ADR-0035 Phase 2: project.allies に書かれた味方 NPC を Player の隣に spawn する。
+    // Ally character は ai: kind: ally を持つ前提で、`AllyBrain` + `AiCommand` を attach する。
+    // Player との被弾交差は無く、Enemy → Player の attack 解決にも入らない (= damage 不発)。
+    let mut ally_spawn_x_offset = -40.0_f32;
+    for ally_name in &project.allies {
+        spawn_ally(
+            &mut commands,
+            &runtime,
+            &asset_server,
+            ally_name,
+            level.player_spawn_x as f32 + ally_spawn_x_offset,
+            level.player_spawn_z as f32,
+        );
+        // 2 体目以降は更に Player 後方にずらす (簡易: 同じ場所に重ねない)。
+        ally_spawn_x_offset -= 24.0;
+    }
 
     commands.insert_resource(library);
-    // movement::handle_input が areas を読めるよう Resource として注入する。
+    // ADR-0033: HUD の player_icon が character の sprite_groups を引けるよう registry に登録。
+    // Character::load_directory が返した sprite_groups と name を P1 ぶんだけ持ち越す
+    // (Phase 1 の MVP は P1 のみ、ADR-0030)。
+    let mut sprite_registry = PlayerSpriteGroupRegistry::default();
+    sprite_registry.insert(
+        PlayerId::P1,
+        character.name.clone(),
+        character.sprite_groups.clone(),
+    );
+    commands.insert_resource(sprite_registry);
+    // ai::apply_command が areas を読めるよう Resource として注入する (ADR-0022 fail-soft)。
     commands.insert_resource(level);
 }
 
@@ -311,6 +408,7 @@ fn build_animation_frames(
             body_box_disabled: extract_body_box_disabled(frame),
             sprite_pivot: [pivot_x, pivot_y],
             image_dims: dims,
+            frame_sound: frame.sound,
         });
     }
 
@@ -412,14 +510,19 @@ pub fn next_triggered_index(triggers: &[OpponentTrigger], player_x: f32) -> Opti
 /// 毎 frame、player の X が trigger_x に到達した最初の `OpponentTrigger` を 1 件だけ
 /// 消費して enemy を spawn する。発火済みは `Level.opponent_triggers` から remove する
 /// ことで「1-shot」を表現する。Enemy は idle Animation で立たせ、左 (player 方向) を向ける。
+#[allow(clippy::too_many_lines)]
 fn spawn_opponents_on_trigger(
     mut commands: Commands,
     mut level: ResMut<Level>,
     runtime: Res<RuntimePaths>,
     asset_server: Res<AssetServer>,
-    player_query: Query<&WorldPosition, With<Player>>,
+    // ADR-0038: 旧 `With<Player>` filter は Hero+Human で再表現。Phase 1 (ADR-0030) の
+    // P1 only MVP のままなので最初の 1 体を取る。
+    player_query: Query<(&WorldPosition, &Side, &Controller)>,
 ) {
-    let Ok(player_pos) = player_query.single() else {
+    let Some(player_pos) = player_query.iter().find_map(|(pos, side, ctrl)| {
+        (matches!(side, Side::Hero) && matches!(ctrl, Controller::Human)).then_some(pos)
+    }) else {
         return;
     };
     let Some(idx) = next_triggered_index(&level.opponent_triggers, player_pos.x) else {
@@ -496,7 +599,10 @@ fn spawn_opponents_on_trigger(
                 idle_data.is_loop,
                 idle_data.loop_start_index,
             ),
-            Enemy,
+            // ADR-0038: 旧 Enemy marker = Villain side + Ai controller。
+            // bundle tuple 15 上限のため Controller は spawn 後 insert に流す
+            // (= EnemyTag / AttackOutcome 系と同方針)。
+            Side::Villain,
             CharacterState::default(),
             Facing::Left,
             enemy_pos,
@@ -514,6 +620,157 @@ fn spawn_opponents_on_trigger(
     if let Some(tag) = &character.tag {
         commands.entity(enemy_entity).insert(EnemyTag(tag.clone()));
     }
+    // ADR-0035 Phase 1.2: character YAML の `ai:` セクションから Brain を attach。
+    // `ai: null` (= AiConfig 未設定) なら Brain なし (= 床に立って何もしない object) として扱い、
+    // AiCommand も attach しない。Phase 2 で増えた `Ally` variant は Enemy spawn 経路では
+    // 受け付けず warn を吐く (= Ally は project.allies 経由で `spawn_ally` から spawn される)。
+    if let Some(ai) = &character.ai {
+        match ai {
+            AiConfig::Melee(cfg) => {
+                commands
+                    .entity(enemy_entity)
+                    .insert((MeleeBrain::new(cfg.clone()), AiCommand::default()));
+            }
+            AiConfig::Ally(_) => {
+                tracing::warn!(
+                    character = %character.name,
+                    "battle: enemy character has ai: kind: ally — ignoring Brain attach \
+                     (allies should be declared in project.allies, not opponents)",
+                );
+            }
+            // ADR-0038: `Bot` は hero (Player spawn 経路) でだけ意味を持つ。Villain には
+            // 適用しない (= 単に warn して MeleeBrain も attach しない)。
+            AiConfig::Bot(_) => {
+                tracing::warn!(
+                    character = %character.name,
+                    "battle: enemy character has ai: kind: bot — ignoring Brain attach \
+                     (bot is hero-only; use ai: kind: melee for villain)",
+                );
+            }
+        }
+    }
+    // ADR-0019: Frame.sound dispatch 用の baked SoundGroup と pending スロット。
+    // ADR-0036: AttackHitConsumed と AttackOutcome を attacker-agnostic に attach。
+    // Enemy → Player の damage / SE 出し分けを Player → Enemy と対称に動かす。spawn の
+    // 15-tuple 上限に収まらないのでここで insert する。
+    // ADR-0038: Controller::Ai は Side::Villain と同 entity に attach (spawn 後 insert)。
+    commands.entity(enemy_entity).insert((
+        bake_character_sounds(&asset_server, &trigger.character_name, &character),
+        SoundDispatch::default(),
+        AttackHitConsumed::default(),
+        AttackOutcome::default(),
+        Controller::Ai,
+    ));
+}
+
+/// ADR-0035 Phase 2: project.allies に書かれた味方 NPC を spawn する。spawn 構造は
+/// `spawn_opponents_on_trigger` の Enemy 経路と概ね同じ (per-entity `EnemyAnimationSet` を
+/// 使い、`sync_enemy_animation` に animation 切替を任せる) が、Brain は `AllyBrain` 固定で、
+/// `Ally` marker (= Enemy / Player と排他) を attach する。
+/// `character.ai` が `Ally` 以外 (Melee or 未指定) のときは warn を出して spawn を諦める
+/// (= ally として宣言された character は ai: kind: ally を持つべき)。
+fn spawn_ally(
+    commands: &mut Commands,
+    runtime: &RuntimePaths,
+    asset_server: &AssetServer,
+    character_name: &str,
+    spawn_x: f32,
+    spawn_z: f32,
+) {
+    let character = match Character::load_directory(runtime, character_name) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                error = %format!("{err:#}"),
+                character = %character_name,
+                "battle: ally load failed",
+            );
+            return;
+        }
+    };
+    let Some(AiConfig::Ally(cfg)) = character.ai.clone() else {
+        tracing::warn!(
+            character = %character.name,
+            "battle: ally character has no ai: kind: ally; skipping spawn",
+        );
+        return;
+    };
+    let Some(idle_data) = build_role_animation_data(
+        runtime,
+        asset_server,
+        character_name,
+        &character,
+        Role::Idle,
+    ) else {
+        tracing::warn!(
+            character = %character.name,
+            "battle: ally has no idle animation, skipping spawn",
+        );
+        return;
+    };
+    let mut anim_set = EnemyAnimationSet::default();
+    anim_set.insert(Role::Idle, idle_data.clone());
+    for &role in Role::all_loadable() {
+        if role == Role::Idle {
+            continue;
+        }
+        if let Some(data) =
+            build_role_animation_data(runtime, asset_server, character_name, &character, role)
+        {
+            anim_set.insert(role, data);
+        }
+    }
+    let first_handle = idle_data.frames[0].handle.clone();
+    let first_anchor = idle_data.frames[0].anchor;
+    let translation = projection::world_to_bevy_f32(spawn_x, 0.0, spawn_z);
+    tracing::info!(
+        character = %character.name,
+        translation = ?translation,
+        "battle: spawning ally",
+    );
+    let ally_pos = WorldPosition::new(spawn_x, 0.0, spawn_z);
+    let ally_entity = commands
+        .spawn((
+            Sprite::from_image(first_handle),
+            first_anchor,
+            Transform::from_translation(translation),
+            AnimationFrames::new(
+                idle_data.frames,
+                idle_data.is_loop,
+                idle_data.loop_start_index,
+            ),
+            // ADR-0038: 旧 Ally marker = Hero side + Ai controller。
+            // bundle tuple 15 上限のため Controller は spawn 後 insert に流す。
+            Side::Hero,
+            CharacterState::default(),
+            Facing::Right,
+            ally_pos,
+            BodyBox::default_for_world(ally_pos),
+            HitPoints::new(character.hp),
+            CharacterDepth(character.depth),
+            anim_set,
+            Combatant::new(&character.physics),
+            KinematicVel::default(),
+            PhysicsParams(character.physics.clone()),
+        ))
+        .id();
+    commands.entity(ally_entity).insert((
+        AllyBrain::new(cfg),
+        AiCommand::default(),
+        Controller::Ai,
+    ));
+    // ADR-0038 Phase 4: Ally の attack は ally→enemy 経路ですでに damage を出すが、加えて
+    // Enemy→Ally も resolve_villain_attacks (= 旧 resolve_enemy_attacks) で Hero side
+    // victim として通る (= ally が enemy で knockback / KO される)。
+    // attacker 側 SE 出し分け用に AttackOutcome / AttackHitConsumed / SoundDispatch /
+    // baked SoundGroup は引き続き対称に attach (Enemy / Player と同じ作法、ADR-0019 /
+    // ADR-0034 / ADR-0036)。
+    commands.entity(ally_entity).insert((
+        bake_character_sounds(asset_server, character_name, &character),
+        SoundDispatch::default(),
+        AttackHitConsumed::default(),
+        AttackOutcome::default(),
+    ));
 }
 
 /// `character` の `role` Animation を引いて `build_animation_frames` で frame 列を作り、

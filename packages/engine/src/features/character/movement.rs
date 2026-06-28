@@ -1,5 +1,15 @@
-//! Movement feature。矢印キー / WASD で `Player` の world 座標を更新し、
-//! Camera を player に X 方向追従させ、`Facing` に応じて sprite を左右反転する。
+//! Movement feature。Camera を player に X 方向追従させ、`Facing` に応じて sprite を左右反転
+//! する system 群、および手動入力 `PlayerInputController` を提供する。
+//!
+//! ADR-0035 で `handle_input` を 2 段に分割した:
+//! - [`player_input_controller`] (本 module) — `ButtonInput` → 自 entity の [`AiCommand`]。
+//!   ADR-0038 で `Controller::Human` 持ちの entity だけを扱う薄い system に変えた。
+//! - [`super::ai::apply_command`] (ai module) — `AiCommand` → `CharacterState` /
+//!   `KinematicVel` / `Facing` / `WorldPosition`。優先度判定と `is_locked()` skip はここに集約。
+//!
+//! ADR-0038 で旧 `Player(PlayerId)` / `Enemy` / `Ally` の 3 marker を [`Side`] / [`Controller`]
+//! の 2 enum component に直交化した。`PlayerId` は引き続き `Controller::Human` 側の entity に
+//! 直接 attach され、HUD の `target: p1` の引き先になる。
 //!
 //! ADR-0023 の world 軸:
 //! - 左右: `world_x` (+ = 右)
@@ -8,26 +18,40 @@
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
-use crate::entities::level::Level;
 use crate::entities::project::Project;
 use crate::shared::PlayerId;
 use crate::shared::projection;
 use crate::shared::{Action, ActionMap};
 
-use super::animation::{AnimationFrames, AnimationSet, VSYNC_TICK_SECS};
+use super::ai::{AiCommand, AiSet, BotBrain};
+use super::animation::{AnimationFrames, AnimationSet};
 use super::debug_control::SimulationSet;
-use super::knockback::{KinematicVel, PhysicsParams};
-use super::state_machine::CharacterState;
 
-/// Player を識別する component。`PlayerId` で個体を区別する (ADR-0030)。
-/// 既存の `With<Player>` filter はそのまま動き、id が必要な system は `&Player` を query する。
-#[derive(Component, Debug, Clone, Copy)]
-pub struct Player(pub PlayerId);
+/// ADR-0038: キャラクターの **陣営 (faction)**。攻撃対象 / HUD target / Brain target の
+/// 起点になる。`Hero` 側は HUD で HP bar が出る側 (= 旧 `Player` + `Ally`)、`Villain` 側は
+/// 殴られる側 (= 旧 `Enemy`)。同 side 内では damage / knockback は発生しない (attack resolve
+/// で `attacker.side != victim.side` の組だけ計算)。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Side {
+    /// HUD で HP bar を出す側。旧 `Player` / `Ally` marker を持っていた entity。
+    Hero,
+    /// 被弾対象として描画される側。旧 `Enemy` marker を持っていた entity。
+    Villain,
+}
 
-/// Opponent (AI / 被弾対象) を識別する marker component。
-/// `Player` と排他で、入力 system や camera follow からは除外される。
-#[derive(Component, Debug, Clone, Copy)]
-pub struct Enemy;
+/// ADR-0038: キャラクターの **操作主体 (controller)**。`Human` は手動入力
+/// (`PlayerInputController`) を受け付ける entity、`Ai` は Brain (Melee/Ally/Bot) が
+/// `AiCommand` を書き込む entity。Side と直交する 2 軸目で、(Hero, Human) = 旧 Player、
+/// (Hero, Ai) = 旧 Ally、(Villain, Ai) = 旧 Enemy。
+/// (Villain, Human) は将来の Mind Control 用に予約 (本 Issue では使われない)。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Controller {
+    /// 手動入力。`PlayerInputController` system が ButtonInput → `AiCommand` を書き込む。
+    Human,
+    /// AI Brain。Side ごとに `MeleeBrain` (Villain) / `AllyBrain` (Hero) / `BotBrain`
+    /// (Hero、Player 自動化) のいずれかが `AiCommand` を書き込む。
+    Ai,
+}
 
 /// Character YAML の `tag` を持つ enemy にだけ attach される識別ラベル (ADR-0031)。
 /// HUD の `enemy_hp_bar` が `target: { tag: "boss" }` で参照する。
@@ -69,160 +93,83 @@ pub enum Facing {
     Left,
 }
 
-/// 1 秒あたりの移動量 (画像ピクセル)。Beat 'em up のキャラ歩行はだいたい
-/// 60-100 px/sec。後で Character.physics 由来にする想定で、現状は定数。
-///
-/// **60Hz pixel-perfect 補足**: 60 の整数倍 (60, 120, 180 ...) は毎 frame の
-/// snap step が「常に同じ px 数」になって完全に滑らかに見える。
-/// 非整数倍 (例: 80 = 1.333 px/frame) は snap pattern が `1, 2, 1, 1, 2 ...` の
-/// 3-frame 周期になるが、AnimationSet::Tick 順序整理後はこの程度の周期パターンは
-/// 体感的に許容できる。歩行速度の見た目を優先したい場合は 80 等の値も使ってよい。
-const MOVE_SPEED_PX_PER_SEC: f32 = 80.0;
-
 pub struct MovementPlugin;
 
 impl Plugin for MovementPlugin {
     fn build(&self, app: &mut App) {
-        // 全部 Update に乗せて、handle_input 側で **dt を VSYNC_TICK_SECS 固定** にする。
+        // ADR-0035: 入力処理を `PlayerInputController` (ButtonInput → AiCommand) +
+        // `super::ai::apply_command` (AiCommand → state) の 2 段に分割。本 plugin は
+        // Player 入力読み取りと sync_* / camera_follow を担当する。
         //
-        // FixedUpdate は wall-clock accumulator なので、vsync の僅かなブレで
-        // 1 render に 0 回 or 2 回走るドリフトが発生する (character の stall / jump として
-        // 視認される)。Bevy の Update は vsync と 1:1 で走るので、Update 内で dt を
-        // 固定値にするのが「frame = vsync = 1 step」を最も素直に実現できる。
-        // 60Hz 想定 (animation の VSYNC_TICK と整合)。
+        // 60Hz 固定 (ai::apply_command 側で dt = VSYNC_TICK_SECS を採用)。FixedUpdate は
+        // wall-clock accumulator で 1 render に 0/2 回走るドリフトが出るので、Update に乗せて
+        // dt を hardcode するのが「frame = vsync = 1 step」を最も素直に実現できる。
+        // `player_input_controller` は AiSet::ReadInputs だけ in_set する (AiSet::ReadInputs
+        // 自体が SimulationSet::Active の子なので、ここで Active を重ねると schedule warning
+        // "redundant edge ... longer path exists" が出る)。
+        app.add_systems(Update, player_input_controller.in_set(AiSet::ReadInputs));
+        // sync_anchor / sync_flip は AnimationFrames の frame 切替後に走らないと
+        // 「新 sprite.image + 旧 anchor/flip」の 1 frame ミスマッチが出る。
+        // apply_command (AiSet::Apply) が state / position を書いたあとに sync_* が走る必要が
+        // あるので `.after(AiSet::Apply)` も付ける。
         app.add_systems(
             Update,
-            (
-                handle_input,
-                // sync_anchor / sync_flip は AnimationFrames の frame 切替後に走らないと
-                // 「新 sprite.image + 旧 anchor/flip」の 1 frame ミスマッチが出る。
-                // sync_transform / camera_follow は anim 非依存だが、tuple ごとまとめて
-                // ordering を付けても害は無いのでそのまま after.
-                (sync_transform, sync_flip, sync_anchor, camera_follow)
-                    .after(handle_input)
-                    .after(AnimationSet::Tick),
-            )
+            (sync_transform, sync_flip, sync_anchor, camera_follow)
+                .after(AiSet::Apply)
+                .after(AnimationSet::Tick)
                 .in_set(SimulationSet::Active),
         );
     }
 }
 
-fn handle_input(
+/// `ButtonInput` を読んで自 entity の [`AiCommand`] に書き込む薄い system (ADR-0035 の
+/// Intent 層書き込み Human 側)。挙動は ADR-0035 Phase 1 と同じ:
+/// - 移動: pressed (押下中継続) を ±1.0 デジタル値で `move_x` / `move_z` に乗せる
+/// - 攻撃 / 下段攻撃 / ジャンプ: `just_pressed` を `attack` / `down_attack` / `jump` に乗せる
+///   (= 押した瞬間 1 frame だけ true)
+/// - ガード: `pressed` を `guard` に乗せる (押下中継続)
+///
+/// `face` は常に None で出し、Facing は `apply_command` 側で `move_x` の符号で更新される
+/// (= 元 `handle_input` と同じ規約)。
+///
+/// ADR-0038: filter は `Controller::Human` 持ちの entity 全部 (= 旧 `Player` marker と
+/// 等価)。Phase 3 の排他規約 `Without<BotBrain>` は維持 — Hero side / Human controller の
+/// entity に BotBrain を attach すれば手動入力 system が自然に skip し、Brain が
+/// `AiCommand` を上書きする。
+fn player_input_controller(
     keys: Res<ButtonInput<KeyCode>>,
     action_map: Res<ActionMap>,
-    level: Option<Res<Level>>,
-    mut query: Query<
-        (
-            &mut WorldPosition,
-            &mut Facing,
-            &mut CharacterState,
-            &mut KinematicVel,
-            &PhysicsParams,
-        ),
-        With<Player>,
-    >,
+    mut query: Query<(&mut AiCommand, &Controller), Without<BotBrain>>,
 ) {
-    // 60Hz 固定。`time.delta()` を読むと vsync ブレが乗って snap step pattern が
-    // 不規則化するため、Update = vsync = 1 frame の前提で hardcode する。
-    let dt = VSYNC_TICK_SECS;
-    let step = MOVE_SPEED_PX_PER_SEC * dt;
-
-    let mut dx = 0.0;
-    let mut dz = 0.0;
+    let mut move_x = 0.0;
     if action_map.pressed(&keys, Action::MoveRight) {
-        dx += step;
+        move_x += 1.0;
     }
     if action_map.pressed(&keys, Action::MoveLeft) {
-        dx -= step;
+        move_x -= 1.0;
     }
+    let mut move_z = 0.0;
     if action_map.pressed(&keys, Action::MoveDown) {
-        dz += step;
+        move_z += 1.0;
     }
     if action_map.pressed(&keys, Action::MoveUp) {
-        dz -= step;
+        move_z -= 1.0;
     }
-    let attack_pressed = action_map.just_pressed(&keys, Action::Attack);
-    // 下段攻撃 (倒れた敵向けの低位置 AttackBox)。
-    let down_attack_pressed = action_map.just_pressed(&keys, Action::DownAttack);
-    // ジャンプ (ADR-0027)、地上 (pos.y == 0) でのみ受付。
-    let jump_pressed = action_map.just_pressed(&keys, Action::Jump);
-    // ガード (ADR-0028): 押下中だけ維持。離すと Idle に戻る (Guard 経路で処理)。
-    let guard_pressed = action_map.pressed(&keys, Action::Guard);
-    let move_target_state = if dx == 0.0 && dz == 0.0 {
-        CharacterState::Idle
-    } else {
-        CharacterState::Walk
-    };
-    // Level 未設定なら制限なし扱い (ADR-0022 の fail-soft)
-    let contains = |x: f32, z: f32| level.as_deref().is_none_or(|l| l.contains_xz(x, z));
-    for (mut pos, mut facing, mut state, mut vel, phys) in &mut query {
-        // Jump 中 (非 locked): 空中移動と向き更新を許し、attack キーで JumpAttack へ。
-        // Y 軸物理は knockback::apply_gravity / apply_velocity / detect_landing が回す。
-        if matches!(*state, CharacterState::Jump) {
-            if dx != 0.0 || dz != 0.0 {
-                let next = step_axis_aware(*pos, dx, dz, contains);
-                pos.x = next.x;
-                pos.z = next.z;
-                if dx > 0.0 {
-                    *facing = Facing::Right;
-                } else if dx < 0.0 {
-                    *facing = Facing::Left;
-                }
-            }
-            if attack_pressed {
-                *state = CharacterState::JumpAttack;
-            }
+    let attack = action_map.just_pressed(&keys, Action::Attack);
+    let down_attack = action_map.just_pressed(&keys, Action::DownAttack);
+    let jump = action_map.just_pressed(&keys, Action::Jump);
+    let guard = action_map.pressed(&keys, Action::Guard);
+    for (mut cmd, controller) in &mut query {
+        if !matches!(controller, Controller::Human) {
             continue;
         }
-        if state.is_locked() {
-            // Attack / JumpAttack / Hit / 吹っ飛びフロー / GuardBreak は入力で上書きしない。
-            continue;
-        }
-        // Guard 中 (非 locked): L 離すと Idle、押下続いていれば Guard 維持。
-        // ガード中は移動 / 攻撃 / ジャンプ入力を全て無視 (= 完全停止)。
-        if matches!(*state, CharacterState::Guard) {
-            if !guard_pressed {
-                *state = CharacterState::Idle;
-            }
-            continue;
-        }
-        // 地上の通常入力。優先度: Guard > Jump > Attack > DownAttack > 移動。
-        // Guard と Jump は地上 (pos.y == 0) のみ受付 (空中ガード / 二段ジャンプ無し、ADR-0027/0028)。
-        if guard_pressed && pos.y == 0.0 {
-            *state = CharacterState::Guard;
-            continue;
-        }
-        if jump_pressed && pos.y == 0.0 {
-            // Y 速度に jump_velocity_y を充填して上昇開始。X/Z は当 frame の入力で別途進む。
-            #[allow(clippy::cast_possible_truncation)]
-            let jv = phys.0.jump_velocity_y as f32;
-            vel.vel_y = jv;
-            *state = CharacterState::Jump;
-            continue;
-        }
-        if attack_pressed {
-            *state = CharacterState::Attack;
-            continue;
-        }
-        if down_attack_pressed {
-            *state = CharacterState::DownAttack;
-            continue;
-        }
-        if dx != 0.0 || dz != 0.0 {
-            let next = step_axis_aware(*pos, dx, dz, contains);
-            pos.x = next.x;
-            pos.z = next.z;
-            // 左右入力があるときだけ向きを更新 (上下のみだと向きを維持)
-            if dx > 0.0 {
-                *facing = Facing::Right;
-            } else if dx < 0.0 {
-                *facing = Facing::Left;
-            }
-        }
-        // Bevy の Changed<> をぶれずに発火させるため等価チェックして必要なときだけ書く
-        if *state != move_target_state {
-            *state = move_target_state;
-        }
+        cmd.move_x = move_x;
+        cmd.move_z = move_z;
+        cmd.attack = attack;
+        cmd.down_attack = down_attack;
+        cmd.jump = jump;
+        cmd.guard = guard;
+        cmd.face = None;
     }
 }
 
@@ -303,15 +250,21 @@ pub fn flip_anchor(base: Anchor, flip_x: bool) -> Anchor {
     }
 }
 
+/// ADR-0038: 旧 `With<Player>` filter は「Hero side + Human controller」(= 旧 Player marker
+/// と等価) で再表現する。複数 Hero+Human entity がある split-screen (ADR-0030 multi-player)
+/// 想定では `single` ではなく PlayerId 別 camera が必要だが、Phase 1 の P1 only MVP
+/// (= 旧挙動) を維持する。
 fn camera_follow(
     project: Option<Res<Project>>,
-    player: Query<&WorldPosition, (With<Player>, Without<MainCamera>)>,
+    player: Query<(&WorldPosition, &Side, &Controller), Without<MainCamera>>,
     mut camera: Query<&mut Transform, With<MainCamera>>,
 ) {
     let Some(project) = project else {
         return;
     };
-    let Ok(player_pos) = player.single() else {
+    let Some(player_pos) = player.iter().find_map(|(pos, side, ctrl)| {
+        (matches!(side, Side::Hero) && matches!(ctrl, Controller::Human)).then_some(pos)
+    }) else {
         return;
     };
     let Ok(mut transform) = camera.single_mut() else {

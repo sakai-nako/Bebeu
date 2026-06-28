@@ -1,0 +1,34 @@
+name: walk
+role: walk
+variant: 0
+is_loop: true
+loop_start_index: 0
+frames:
+- index: 0
+  ticks: 9
+  layers:
+  - index: 0
+    sprite_group_number: 1
+    sprite_index: 0
+    transparency: 1.0
+- index: 1
+  ticks: 9
+  layers:
+  - index: 0
+    sprite_group_number: 1
+    sprite_index: 1
+    transparency: 1.0
+- index: 2
+  ticks: 9
+  layers:
+  - index: 0
+    sprite_group_number: 1
+    sprite_index: 0
+    transparency: 1.0
+- index: 3
+  ticks: 9
+  layers:
+  - index: 0
+    sprite_group_number: 1
+    sprite_index: 2
+    transparency: 1.0

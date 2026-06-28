@@ -11,19 +11,21 @@
 //! - 1-shot 状態 (Attack / Hit など `is_locked` の Animation) は [`end_oneshot_actions`]
 //!   が再生終端で Idle に戻す。
 //!
-//! state の更新 (入力に応じた Idle ⇄ Walk) は [`super::movement::handle_input`] が行う。
+//! state の更新 (入力に応じた Idle ⇄ Walk) は [`super::ai::apply_command`] が行う
+//! (ADR-0035 で `movement::handle_input` から分離)。
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
-use crate::entities::character::Role;
+use crate::entities::character::{Role, SpriteGroup};
+use crate::shared::PlayerId;
 
 use super::animation::{AnimationFrames, FrameRender};
 use super::debug_control::SimulationSet;
 use super::hit_stop::HitStopState;
 use super::knockback::{Combatant, FinalAction};
-use super::movement::{Enemy, Facing, Player, WorldPosition, flip_anchor, total_flip_x};
+use super::movement::{Facing, WorldPosition, flip_anchor, total_flip_x};
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CharacterState {
@@ -42,9 +44,9 @@ pub enum CharacterState {
     /// または着地 (`pos.y <= 0`) で `Self::Idle` に戻る。
     JumpAttack,
     /// 立ちガード (ADR-0028)。`L` キー押下中だけ維持され、離すと `Self::Idle` に戻る
-    /// (movement::handle_input 側で毎 frame 入力チェック)。ガード中の被弾は damage /
+    /// (ai::apply_command 側で毎 frame 入力チェック)。ガード中の被弾は damage /
     /// knockback_gauge を無傷化し、`guard_gauge` だけが削れる。`is_locked == false` (移動は
-    /// 抑止しないが、attack / jump 入力は handle_input で個別に抑止する)。
+    /// 抑止しないが、attack / jump 入力は apply_command で個別に抑止する)。
     Guard,
     /// ガードクラッシュ (ADR-0028)。`guard_gauge <= 0` で `Guard` から遷移する 1 frame 中継。
     /// 次の state machine tick で `Self::KnockbackUp` に書き換わり、ADR-0024 の吹っ飛びフローへ
@@ -158,15 +160,58 @@ impl PlayerAnimationLibrary {
     }
 }
 
+/// ADR-0033: HUD の `player_icon` 要素が character の sprite_groups を引くための registry。
+///
+/// `PlayerAnimationLibrary` は **役割 (Role) ベース**の cache (= 動画再生用) で、こちらは
+/// **生の sprite_groups**を player 別に保持する (= HUD アイコン用の任意 group を引くため)。
+/// battle setup で Character をロードし終わったあとに insert される。
+///
+/// `character_name` は `Handle<Image>` を asset_server で load するときの相対 path 構築
+/// (`characters/{character}/sprite-groups/{group}/sprites/{file}`) に使う。
+#[derive(Resource, Default)]
+pub struct PlayerSpriteGroupRegistry {
+    by_player: HashMap<PlayerId, PlayerSpriteGroups>,
+}
+
+/// 1 Player ぶんの sprite_groups と character 名のセット。
+pub struct PlayerSpriteGroups {
+    pub character_name: String,
+    pub sprite_groups: HashMap<u32, SpriteGroup>,
+}
+
+impl PlayerSpriteGroupRegistry {
+    pub fn insert(
+        &mut self,
+        player_id: PlayerId,
+        character_name: String,
+        sprite_groups: HashMap<u32, SpriteGroup>,
+    ) {
+        self.by_player.insert(
+            player_id,
+            PlayerSpriteGroups {
+                character_name,
+                sprite_groups,
+            },
+        );
+    }
+
+    #[must_use]
+    pub fn get(&self, player_id: PlayerId) -> Option<&PlayerSpriteGroups> {
+        self.by_player.get(&player_id)
+    }
+}
+
 pub struct StateMachinePlugin;
 
 impl Plugin for StateMachinePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PlayerAnimationLibrary>().add_systems(
-            Update,
-            (end_oneshot_actions, sync_animation, sync_enemy_animation)
-                .in_set(SimulationSet::Active),
-        );
+        app.init_resource::<PlayerAnimationLibrary>()
+            .init_resource::<PlayerSpriteGroupRegistry>()
+            .add_systems(
+                Update,
+                (end_oneshot_actions, sync_animation, sync_enemy_animation)
+                    .in_set(SimulationSet::Active),
+            );
     }
 }
 
@@ -336,7 +381,11 @@ fn sync_animation(
             &mut Sprite,
             &mut Anchor,
         ),
-        (With<Player>, Changed<CharacterState>),
+        // ADR-0038: Player 用 animation library を引く対象は「entity 持ちの
+        // `EnemyAnimationSet` を持たない character」(= 旧 With<Player> と等価。Ally / Enemy
+        // は entity 持ち library 経路で `sync_enemy_animation` 側が捌く)。
+        // `Without<EnemyAnimationSet>` で archetype 単位の disjoint を作る。
+        (Without<EnemyAnimationSet>, Changed<CharacterState>),
     >,
 ) {
     for (state, facing, combatant, mut anim, mut sprite, mut anchor) in &mut query {
@@ -359,9 +408,14 @@ fn sync_animation(
     }
 }
 
-/// Enemy の CharacterState が変化したら、entity 自身が持つ `EnemyAnimationSet` から
-/// AnimationData を引いて同様に hot swap する。Enemy 用 library は entity 持ちのため
-/// 将来複数 character (`opponent_triggers`) で別 role 集合を持たせやすい。
+/// per-entity `EnemyAnimationSet` を持つ AI 駆動 character (= 旧 Enemy + 旧 Ally) の
+/// CharacterState が変化したら、entity 自身が持つ `EnemyAnimationSet` から AnimationData を
+/// 引いて同様に hot swap する。entity 持ちにしているのは別キャラ同居を許すため。
+///
+/// ADR-0038: `Or<(With<Enemy>, With<Ally>)>` の代わりに `With<EnemyAnimationSet>` で disjoint
+/// を作る (= component の有無で `sync_animation` (Player) と排他)。component 名は
+/// 「Villain 用 library」を示唆するが Hero side AI (= Ally) でも共用する規約は維持。
+#[allow(clippy::type_complexity)]
 fn sync_enemy_animation(
     mut query: Query<
         (
@@ -373,7 +427,7 @@ fn sync_enemy_animation(
             &mut Sprite,
             &mut Anchor,
         ),
-        (With<Enemy>, Changed<CharacterState>),
+        Changed<CharacterState>,
     >,
 ) {
     for (state, facing, combatant, set, mut anim, mut sprite, mut anchor) in &mut query {

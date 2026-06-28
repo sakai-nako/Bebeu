@@ -7,9 +7,10 @@
 mod api;
 mod model;
 pub use model::{
-    Animation, AttackBox, AttackBoxMeta, AttackBoxOverride, Character, DEFAULT_BOUNCE_COUNT,
-    DEFAULT_BOUNCE_DAMPENING, DEFAULT_DEPTH, DEFAULT_GRAVITY, DEFAULT_GROUND_FRICTION,
-    DEFAULT_HIT_RECOVERY_MS, DEFAULT_HP, DEFAULT_JUMP_VELOCITY_Y, DEFAULT_KNOCKBACK_THRESHOLD,
-    DEFAULT_LIE_DOWN_DURATION_MS, DEFAULT_RISE_DURATION_MS, Frame, HitBox, HitStop, KnockbackVec,
-    Layer, Physics, Role, SpriteEntry, SpriteGroup,
+    AiConfig, AllyConfig, Animation, AttackBox, AttackBoxMeta, AttackBoxOverride, BotConfig,
+    Character, DEFAULT_BOUNCE_COUNT, DEFAULT_BOUNCE_DAMPENING, DEFAULT_DEPTH, DEFAULT_GRAVITY,
+    DEFAULT_GROUND_FRICTION, DEFAULT_HIT_RECOVERY_MS, DEFAULT_HP, DEFAULT_JUMP_VELOCITY_Y,
+    DEFAULT_KNOCKBACK_THRESHOLD, DEFAULT_LIE_DOWN_DURATION_MS, DEFAULT_RISE_DURATION_MS,
+    EngagementConfig, Frame, FrameSound, HitBox, HitStop, KnockbackVec, Layer, MeleeConfig,
+    Physics, Role, Sound, SoundGroup, SpriteEntry, SpriteGroup, TargetSelector,
 };

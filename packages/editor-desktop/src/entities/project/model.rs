@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::entities::character::Role;
 
 /// Local co-op の Player 識別子 (ADR-0030)。engine 側の `shared::PlayerId` と同じ形を
 /// editor に mirror する (ADR-0001 FSD: editor / engine は独立に同 struct を保つ)。
@@ -95,6 +99,10 @@ pub enum HudElement {
     EnemyHpBar(EnemyHpBarConfig),
     /// ADR-0032: world-anchored、Enemy entity の頭上に attach される。anchor 系は無効。
     EnemyOverheadHpBar(EnemyOverheadHpBarConfig),
+    /// ADR-0033: Player の CharacterState に応じて Icon を切り替える HUD 要素。
+    /// `sprite_group_number` で指す Character 内の専用 SpriteGroup から `state_sprites` map で
+    /// 各 Role の sprite を引く。`shake` で被弾 / attack 当てを独自 trigger に振動を入れられる。
+    PlayerIcon(PlayerIconConfig),
 }
 
 impl HudElement {
@@ -106,6 +114,7 @@ impl HudElement {
             HudElement::PlayerHpRing(_) => "Player HP ring",
             HudElement::EnemyHpBar(_) => "Enemy HP bar",
             HudElement::EnemyOverheadHpBar(_) => "Enemy overhead HP bar",
+            HudElement::PlayerIcon(_) => "Player icon",
         }
     }
 
@@ -117,6 +126,7 @@ impl HudElement {
             HudElement::PlayerHpRing(_) => "player_hp_ring",
             HudElement::EnemyHpBar(_) => "enemy_hp_bar",
             HudElement::EnemyOverheadHpBar(_) => "enemy_overhead_hp_bar",
+            HudElement::PlayerIcon(_) => "player_icon",
         }
     }
 
@@ -140,6 +150,10 @@ impl HudElement {
                 value: "enemy_overhead_hp_bar",
                 label: "Enemy overhead HP bar",
             },
+            HudKindOption {
+                value: "player_icon",
+                label: "Player icon",
+            },
         ]
     }
 
@@ -153,6 +167,7 @@ impl HudElement {
             "enemy_overhead_hp_bar" => {
                 Some(Self::EnemyOverheadHpBar(EnemyOverheadHpBarConfig::default()))
             }
+            "player_icon" => Some(Self::PlayerIcon(PlayerIconConfig::default())),
             _ => None,
         }
     }
@@ -165,6 +180,7 @@ impl HudElement {
             HudElement::PlayerHpBar(c) => c.anchor,
             HudElement::PlayerHpRing(c) => c.anchor,
             HudElement::EnemyHpBar(c) => c.anchor,
+            HudElement::PlayerIcon(c) => c.anchor,
             HudElement::EnemyOverheadHpBar(_) => HudAnchor::default(),
         }
     }
@@ -176,6 +192,7 @@ impl HudElement {
             HudElement::PlayerHpBar(c) => c.anchor_to.as_ref(),
             HudElement::PlayerHpRing(c) => c.anchor_to.as_ref(),
             HudElement::EnemyHpBar(c) => c.anchor_to.as_ref(),
+            HudElement::PlayerIcon(c) => c.anchor_to.as_ref(),
             HudElement::EnemyOverheadHpBar(_) => None,
         }
     }
@@ -187,6 +204,7 @@ impl HudElement {
             HudElement::PlayerHpBar(c) => c.offset,
             HudElement::PlayerHpRing(c) => c.offset,
             HudElement::EnemyHpBar(c) => c.offset,
+            HudElement::PlayerIcon(c) => c.offset,
             HudElement::EnemyOverheadHpBar(_) => HudOffset::default(),
         }
     }
@@ -198,6 +216,7 @@ impl HudElement {
             HudElement::PlayerHpBar(c) => c.id.as_deref(),
             HudElement::PlayerHpRing(c) => c.id.as_deref(),
             HudElement::EnemyHpBar(c) => c.id.as_deref(),
+            HudElement::PlayerIcon(c) => c.id.as_deref(),
             HudElement::EnemyOverheadHpBar(_) => None,
         }
     }
@@ -454,6 +473,98 @@ impl Default for EnemyOverheadHpBarConfig {
 
 fn default_overhead_offset_y() -> f32 {
     4.0
+}
+
+/// Player の CharacterState に応じて Icon を切り替える HUD 要素 (ADR-0033)。engine 側 mirror。
+///
+/// `sprite_group_number` で Character.sprite_groups の中の専用 group を選び、
+/// `state_sprites` で各 Role に対応する sprite_index を割り当てる。未指定 Role は
+/// `default_sprite_index` にフォールバック。`shake` で被弾 / 攻撃当てを trigger にした
+/// 独自振動を設定可能。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlayerIconConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub target: PlayerId,
+    #[serde(default)]
+    pub anchor: HudAnchor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_to: Option<HudElementAnchor>,
+    #[serde(default)]
+    pub offset: HudOffset,
+    pub size: HudSize,
+    #[serde(default)]
+    pub frame: HudFrame,
+    #[serde(default = "default_icon_bg_color")]
+    pub bg_color: HexColor,
+    /// 対象 Player の Character.sprite_groups から引く group の number。
+    pub sprite_group_number: u32,
+    /// state_sprites に該当しない state のときの fallback sprite_index。
+    #[serde(default)]
+    pub default_sprite_index: u32,
+    /// Role → sprite_index の map。engine 側で CharacterState::to_role() で変換して引く。
+    #[serde(default)]
+    pub state_sprites: HashMap<Role, u32>,
+    /// 振動 trigger と振動パラメータ。default は両 trigger 無効 = 振動なし。
+    #[serde(default)]
+    pub shake: IconShakeConfig,
+}
+
+impl Default for PlayerIconConfig {
+    fn default() -> Self {
+        Self {
+            id: None,
+            target: PlayerId::default(),
+            anchor: HudAnchor::TopLeft,
+            anchor_to: None,
+            offset: HudOffset { x: 16.0, y: 16.0 },
+            size: HudSize { w: 32.0, h: 32.0 },
+            frame: HudFrame::default(),
+            bg_color: default_icon_bg_color(),
+            sprite_group_number: 0,
+            default_sprite_index: 0,
+            state_sprites: HashMap::new(),
+            shake: IconShakeConfig::default(),
+        }
+    }
+}
+
+/// Icon HUD の default bg。完全透明 (= 枠だけ + 画像)。
+fn default_icon_bg_color() -> HexColor {
+    HexColor {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+    }
+}
+
+/// PlayerIcon の振動 trigger と振動パラメータ (ADR-0033)。
+/// trigger を `Some` にしないとその trigger では振動しない (default は両方 None)。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct IconShakeConfig {
+    /// Player の HitPoints が減ったとき発火 (= 被弾 / guard damage 等)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_damage: Option<IconShakeParams>,
+    /// Player が attack を当てたとき発火 (= attacker に HitStopState attach)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_attack_hit: Option<IconShakeParams>,
+}
+
+/// 振動パラメータ。engine の `HitStopState` と同じ三角波 + 線形減衰モデル。
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct IconShakeParams {
+    #[serde(default)]
+    pub duration_ms: u32,
+    #[serde(default)]
+    pub shake_x: i32,
+    #[serde(default)]
+    pub shake_y: i32,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub decay: f32,
 }
 
 /// overhead bar の Y 基準 (ADR-0032)。engine 側と対称。
@@ -1030,6 +1141,56 @@ mod tests {
         for a in OverheadVerticalAnchor::ALL {
             assert_eq!(OverheadVerticalAnchor::parse(a.value()), Some(*a));
         }
+    }
+
+    #[test]
+    fn player_icon_round_trips_through_yaml_with_state_sprites_and_shake() {
+        // ADR-0033: editor 側も engine と対称に player_icon を parse できる。
+        let yaml = r#"elements:
+  - kind: player_icon
+    id: p1_icon
+    target: p1
+    anchor: top_left
+    offset: { x: 8.0, "y": 8.0 }
+    size: { w: 40.0, h: 40.0 }
+    sprite_group_number: 100
+    default_sprite_index: 0
+    state_sprites:
+      idle: 0
+      attack: 1
+      hit: 2
+    shake:
+      on_damage:
+        duration_ms: 200
+        shake_y: 3
+        count: 4
+        decay: 1.0
+"#;
+        let hud: Hud = serde_saphyr::from_str(yaml).expect("hud yaml parses");
+        let HudElement::PlayerIcon(cfg) = &hud.elements[0] else {
+            unreachable!("expected player_icon variant");
+        };
+        assert_eq!(cfg.sprite_group_number, 100);
+        assert_eq!(cfg.state_sprites.get(&Role::Idle), Some(&0));
+        assert_eq!(cfg.state_sprites.get(&Role::Attack), Some(&1));
+        assert_eq!(cfg.state_sprites.get(&Role::Hit), Some(&2));
+        let on_damage = cfg.shake.on_damage.expect("on_damage present");
+        assert_eq!(on_damage.duration_ms, 200);
+        assert_eq!(on_damage.shake_y, 3);
+        assert!(cfg.shake.on_attack_hit.is_none());
+    }
+
+    #[test]
+    fn player_icon_kind_label_and_default_for_kind() {
+        // all_kinds に player_icon が含まれていて、default_for_kind("player_icon") が Some を返す。
+        assert!(
+            HudElement::all_kinds()
+                .iter()
+                .any(|o| o.value == "player_icon")
+        );
+        let el = HudElement::default_for_kind("player_icon").expect("default player_icon");
+        assert_eq!(el.kind_label(), "Player icon");
+        assert_eq!(el.kind_value(), "player_icon");
     }
 
     #[test]

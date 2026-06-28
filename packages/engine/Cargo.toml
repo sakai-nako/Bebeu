@@ -1,5 +1,5 @@
 [package]
-name = "engine"
+name = "bebeu-engine"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [[bin]]
-name = "beatemup"
+name = "bebeu-engine"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,7 +17,17 @@ serde.workspace = true
 serde-saphyr.workspace = true
 tracing.workspace = true
 
-bevy = "0.18"
+bevy = { version = "0.19", features = ["wav"] }
+# SoundGroup.pick の重み付き乱選で使う (ADR-0019)。
+# 簡易乱数で十分なので thread_rng + Uniform レベル機能のみ使う。
+rand = "0.9"
+
+[features]
+# 開発時のリンク高速化用 (Bevy 推奨)。
+# bevy_dylib 経由で動的リンクに切り替え、static link の重さを回避する。
+# 配布 binary では使わない (libbevy_dylib.dll を同梱する必要が出るため)。
+# `just engine-run` / `just engine-run-sample` 経由で有効化される。
+dev = ["bevy/dynamic_linking"]
 
 [dev-dependencies]
 tempfile.workspace = true

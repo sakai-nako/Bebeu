@@ -6,7 +6,7 @@
 
 | crate | 役割 |
 |-------|------|
-| `packages/engine` | Bevy ベースの runtime (`beatemup` バイナリ) |
+| `packages/engine` | Bevy ベースの runtime (`bebeu-engine` バイナリ) |
 | `packages/editor-desktop` | Dioxus desktop の編集ツール (workspace_dir 配下の YAML を編集) |
 | `tools/asset-gen` | sample-projects 用プレースホルダー PNG ジェネレータ |
 

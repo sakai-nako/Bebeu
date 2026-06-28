@@ -1,0 +1,13 @@
+name: rise
+number: 9
+sprites:
+- index: 0
+  path: 001.png
+  pivot_point:
+  - 24
+  - 90
+  body_boxes:
+  - top_left: [12, 42]
+    bottom_right: [36, 88]
+    depth: 16
+  attack_boxes: null

@@ -7,7 +7,7 @@ just engine-run                  # alias: en-run         # debug
 just engine-run-release          # alias: en-run-rel     # release
 ```
 
-実体は `cargo run -p engine --bin beatemup` (release 版は `--release`)。
+実体は `cargo run -p bebeu-engine --bin bebeu-engine` (release 版は `--release`)。
 
 ## sample プロジェクトで起動
 
@@ -34,4 +34,4 @@ just engine-run-sample -- --project=minimal
 just engine-build                # alias: en-build
 ```
 
-`cargo build --release` 後、`target/release/beatemup(.exe)` を `runtime/build/` 配下にコピーする。
+`cargo build --release` 後、`target/release/bebeu-engine(.exe)` を `runtime/build/` 配下にコピーする。

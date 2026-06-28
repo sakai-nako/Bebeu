@@ -42,8 +42,13 @@ ADR は前身リポジトリ `local-game-workspace` (Go + ebitengine engine, Rus
 | 0027 | [ジャンプと空中攻撃を独立 State として導入し、Knockback と Y 軸物理を共有する](0027-jump-and-aerial-combat.md) | Accepted |
 | 0028 | [Guard を gauge 1 本で表現し、GuardBreak は Knockback フローに合流させる](0028-guard-gauge-and-guard-break.md) | Accepted |
 | 0029 | [HUD レイアウトは Project YAML に持つ](0029-hud-layout-in-project-yaml.md) | Accepted |
+| 0038 | [キャラクター marker を Side / Controller 2 軸に分離する](0038-side-controller-marker-separation.md) | Accepted |
+| 0039 | [Brain trait + TargetSelector enum で 3 Brain を宣言的に組む](0039-brain-trait-and-target-selector.md) | Accepted |
+| 0040 | [Public mirror GitHub Releases zip 配布の構造](0040-public-mirror-github-releases-distribution.md) | Accepted |
+
+> 0030-0037 はテーブル未追記 (= 過去追記漏れ)。詳細は `ls .claude/adr/` を参照。
 
 ## 書き方
 
-新しい ADR は次の番号 (`0030-` から) を使い、テンプレートは ADR-0001 を参考にしてください。
+新しい ADR は次の番号を使い、テンプレートは ADR-0001 を参考にしてください。
 Status は Accepted / Superseded by ADR-XXXX / Refined by ADR-XXXX / Deprecated のいずれか。

@@ -18,3 +18,9 @@ node_modules/
 
 # private な workspace_dir。Public 版では sample-projects のみ tracking する。
 /runtime/
+
+# マーケティング集約箱。本体は mirror tool 側で除外済みだが、念のため二重防御。
+/marketing/
+
+# Claude Code + Orca で worktree を作る時の配置先 (machine-local)。
+/.claude/worktrees/

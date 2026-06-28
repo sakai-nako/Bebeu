@@ -23,3 +23,7 @@ workspace dir の構造:
 ```
 
 既定では `sample-projects/minimal` がそのまま workspace dir として機能する (CC0 プレースホルダー素材で動く最小プロジェクト)。自前プロジェクトを作るときは `sample-projects/minimal` を repo の外にコピーして、`workspace_dir` を新しいパスへ向け直す。
+
+## 環境変数による上書き
+
+`BEATEMUP_EDITOR_WORKSPACE_DIR` を立てると、`bebeu-editor.yml` もフォルダ選択ダイアログも介さず、env var の値をそのまま workspace dir として使う。`bebeu-editor.yml` を書き換えずに別の workspace を試したいとき (sample-projects を見るときなど) に便利。`just editor-desktop-dev-sample` がこの経路を使う。
