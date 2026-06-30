@@ -5,13 +5,18 @@
 //! どちらも未指定なら convention の `"main"` を default として採用する
 //! (実在しなければ `Project::load_from_file` が warn で fail-soft する)。
 use std::env;
+use std::time::Duration;
 
 use anyhow::Result;
 use bevy::asset::AssetPlugin;
 use bevy::image::ImagePlugin;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use bevy::window::WindowResolution;
+use bevy::settings::{SaveSettingsDeferred, SaveSettingsSync, SettingsPlugin};
+use bevy::window::{
+    ExitCondition, MonitorSelection, PrimaryWindow, WindowCloseRequested, WindowMode, WindowMoved,
+    WindowPosition, WindowResized, WindowResolution,
+};
 
 use super::pixel_perfect::{PixelPerfectConfig, PixelPerfectRenderPlugin};
 use crate::entities::project::Project;
@@ -22,7 +27,8 @@ use crate::features::character::{
 use crate::features::hud::HudPlugin;
 use crate::scenes::{battle, options, result, title};
 use crate::shared::ActionMap;
-use crate::shared::config::{EngineConfig, RuntimePaths, WindowConfig};
+use crate::shared::config::{EngineConfig, RuntimePaths};
+use crate::shared::settings::{APP_NAME, WindowSettings};
 
 /// 既定のログフィルタ。`RUST_LOG` が設定されていればそちらが優先される (Bevy `LogPlugin` 仕様)。
 ///
@@ -30,12 +36,15 @@ use crate::shared::config::{EngineConfig, RuntimePaths, WindowConfig};
 /// - その他は info 既定
 const DEFAULT_LOG_FILTER: &str = "wgpu=error,wgpu_core=error,wgpu_hal=error,naga=warn,info";
 
-/// `bebeu-engine.yml` で `window:` が未指定のとき viewport にかける整数倍率。
-/// 3 のとき 384×216 → 1152×648 (フル HD に余裕で乗る大きさ)。
-/// yml で明示指定された場合はそちらが優先される。
+/// viewport にかける整数倍率 (初期 window サイズ算出用)。3 のとき 384×216 → 1152×648。
+/// ADR-0041 で window サイズは App Settings (`WindowSettings.size`) に移管したが、
+/// 初回起動時 (= TOML 不在) はこの定数で算出した値が初期サイズになる。
 const WINDOW_INTEGER_SCALE_FALLBACK: u32 = 3;
 /// Project 未指定時に使う viewport 解像度の fallback (= main project の resolution)。
 const FALLBACK_VIEWPORT: (u32, u32) = (384, 216);
+
+/// `SaveSettingsDeferred` の debounce 遅延 (window move/resize の連続発火を吸収)。
+const SETTINGS_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
@@ -146,14 +155,12 @@ pub fn run(opts: RunOptions) -> Result<()> {
     let (vp_w, vp_h) = project.as_ref().map_or(FALLBACK_VIEWPORT, |p| {
         (p.resolution.width, p.resolution.height)
     });
-    let (win_w, win_h) = engine_config.window.map_or_else(
-        || {
-            (
-                vp_w * WINDOW_INTEGER_SCALE_FALLBACK,
-                vp_h * WINDOW_INTEGER_SCALE_FALLBACK,
-            )
-        },
-        |WindowConfig { width, height }| (width, height),
+    // 初期 window サイズは viewport × 整数倍率の固定 fallback。
+    // 起動後に `apply_window_settings` で `WindowSettings.size` があれば override される
+    // (ADR-0041 — pixel_perfect_config の resize 追従は別 Issue で扱う)。
+    let (win_w, win_h) = (
+        vp_w * WINDOW_INTEGER_SCALE_FALLBACK,
+        vp_h * WINDOW_INTEGER_SCALE_FALLBACK,
     );
     let pixel_perfect_config =
         PixelPerfectConfig::from_viewport_and_window((vp_w, vp_h), (win_w, win_h));
@@ -161,7 +168,7 @@ pub fn run(opts: RunOptions) -> Result<()> {
         viewport = ?pixel_perfect_config.viewport,
         intermediate = ?pixel_perfect_config.intermediate,
         window = ?pixel_perfect_config.window,
-        "engine: pixel-perfect 3-tier sizes resolved (window=yml or viewport×{} fallback)",
+        "engine: pixel-perfect 3-tier sizes resolved (initial = viewport×{})",
         WINDOW_INTEGER_SCALE_FALLBACK,
     );
 
@@ -172,10 +179,13 @@ pub fn run(opts: RunOptions) -> Result<()> {
                 primary_window: Some(Window {
                     title: "Bebeu".into(),
                     // 物理 pixel で固定 + scale_factor_override(1.0) で OS DPI スケーリングを
-                    // 無視し、yml と実際の window サイズを 1:1 に保証する。
+                    // 無視し、要求 window サイズと実際の window サイズを 1:1 に保証する。
                     resolution: WindowResolution::new(win_w, win_h).with_scale_factor_override(1.0),
                     ..default()
                 }),
+                // ADR-0041 — close 直前に `SaveSettingsSync::IfChanged` を queue する余地を
+                // 残すため、Bevy デフォルトの「最後の window が閉じたら即 exit」を抑止する。
+                exit_condition: ExitCondition::DontExit,
                 ..default()
             })
             .set(LogPlugin {
@@ -191,6 +201,8 @@ pub fn run(opts: RunOptions) -> Result<()> {
             // 中間 render texture だけ pixel_perfect.rs で linear に上書きする (ADR-0026)。
             .set(ImagePlugin::default_nearest()),
     )
+    .add_plugins(SettingsPlugin::new(APP_NAME))
+    .add_plugins(UserSettingsPlugin)
     .insert_resource(pixel_perfect_config);
     register_engine_plugins(&mut app);
 
@@ -205,4 +217,89 @@ pub fn run(opts: RunOptions) -> Result<()> {
     app.insert_resource(runtime).run();
 
     Ok(())
+}
+
+/// ADR-0041 — `WindowSettings` / `AudioSettings` を Window entity に反映 + 変更検出 +
+/// close 時 save を担う wiring。`SettingsPlugin` の **後** に追加すること
+/// (前置だと `WindowSettings` が世界にまだ無く、apply 関数が no-op になる)。
+struct UserSettingsPlugin;
+
+impl Plugin for UserSettingsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, apply_window_settings)
+            .add_systems(Update, (track_window_changes, save_on_window_close).chain());
+    }
+}
+
+/// 起動時、`WindowSettings` の保存値があれば primary window に反映する。
+/// 値が `None` のフィールドは触らない (= primary_window の初期値が残る)。
+fn apply_window_settings(
+    settings: Res<WindowSettings>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    if let Some(position) = settings.position {
+        window.position = WindowPosition::At(position);
+    }
+    if let Some(size) = settings.size {
+        window.resolution = WindowResolution::new(size.x, size.y).with_scale_factor_override(1.0);
+    }
+    window.mode = if settings.fullscreen {
+        WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+    } else {
+        WindowMode::Windowed
+    };
+}
+
+/// ユーザーによる window 移動 / リサイズを検出して `WindowSettings` に反映、debounce 保存。
+fn track_window_changes(
+    mut moved: MessageReader<WindowMoved>,
+    mut resized: MessageReader<WindowResized>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut settings: ResMut<WindowSettings>,
+    mut commands: Commands,
+) {
+    let mut changed = false;
+    for _ in moved.read() {
+        changed = true;
+    }
+    for _ in resized.read() {
+        changed = true;
+    }
+    if !changed {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let next = WindowSettings {
+        position: match window.position {
+            WindowPosition::At(pos) => Some(pos),
+            _ => None,
+        },
+        size: Some(UVec2::new(
+            window.resolution.width() as u32,
+            window.resolution.height() as u32,
+        )),
+        fullscreen: window.mode != WindowMode::Windowed,
+    };
+    if settings.set_if_neq(next) {
+        commands.queue(SaveSettingsDeferred(SETTINGS_SAVE_DEBOUNCE));
+    }
+}
+
+/// `ExitCondition::DontExit` の代わりに、最後の window が閉じたら settings を同期保存し
+/// てから明示的に `AppExit` を発行する (ADR-0041)。
+fn save_on_window_close(
+    mut close: MessageReader<WindowCloseRequested>,
+    mut commands: Commands,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if close.read().next().is_some() {
+        commands.queue(SaveSettingsSync::IfChanged);
+        exit.write(AppExit::Success);
+    }
 }

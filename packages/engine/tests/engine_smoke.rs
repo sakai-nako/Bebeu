@@ -15,6 +15,8 @@ use bevy::mesh::MeshPlugin;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 
+use bebeu_engine::AudioSettings;
+
 #[test]
 fn engine_app_runs_a_few_frames_without_panic() {
     let mut app = App::new();
@@ -35,6 +37,10 @@ fn engine_app_runs_a_few_frames_without_panic() {
     app.add_plugins(InputPlugin);
     // hitbox_debug::draw_hitboxes が `Gizmos` を取るため GizmoPlugin が要る。
     app.add_plugins(GizmoPlugin);
+    // ADR-0041 — tick_sound_dispatch が `Res<AudioSettings>` を取る (master_volume の
+    // gain 適用)。本番は SettingsPlugin が load して挿入するが smoke test では
+    // SettingsPlugin を使わない (disk I/O を避ける) ので default を直接 init する。
+    app.init_resource::<AudioSettings>();
     bebeu_engine::register_engine_plugins(&mut app);
 
     // 数 frame 回して Startup / Update / state 遷移系の system params を一通り fetch させる。

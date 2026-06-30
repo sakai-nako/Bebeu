@@ -1,0 +1,20 @@
+_meta:
+  language_name: English
+
+app:
+  startup_error_title: Startup error
+  startup_error_message: "Failed to load configuration: %{error}"
+  unexpected_error: An unexpected error has occurred.
+
+projects:
+  index_empty_hint: Select a Project from the sidebar.
+
+preferences:
+  title: Preferences
+  close: Close
+  theme: Theme
+  theme_unknown: "Unknown theme: %{value}"
+  locale: Language
+  locale_unknown: "Unknown locale: %{value}"
+  locale_ja: 日本語 (Japanese)
+  locale_en: English

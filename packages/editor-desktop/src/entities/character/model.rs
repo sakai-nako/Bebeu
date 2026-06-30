@@ -9,6 +9,30 @@ use crate::shared::{AttackBox, AttackBoxMeta, AttackBoxOverride, FlipMode, HitBo
 /// 16 を起点にする。実プロジェクトでは Character ごとに調整する想定。
 pub const DEFAULT_CHARACTER_DEPTH: u32 = 16;
 
+// === AI (ADR-0035 Phase 5) ===
+//
+// editor 側 AI Config 型群。engine 側 (`packages/engine/src/entities/character/model.rs`) と
+// YAML 上互換になるよう field 名・形を揃える。値は engine 同値を再定義する
+// (editor / engine は独立を維持する規約に従う)。
+//
+// 構造:
+// - `EngagementConfig` (7 field) は 3 BrainConfig 共通の Idle/Chase/Attack パラメータ。
+//   `#[serde(flatten)]` で各 BrainConfig の YAML 表現に展開される (ADR-0039)。
+// - `MeleeConfig` / `BotConfig` は `engagement` + `selector` のみ。
+// - `AllyConfig` は `engagement` + `follow_distance_min/max_px` + `selector`。
+// - `TargetSelector` は `Nearest` / `LastEngaged` / `Random` / `WeightedByThreat` の 4 variant
+//   (engine 側で `Random` / `WeightedByThreat` は stub、editor では variant 定義のみ持つ)。
+
+pub const DEFAULT_AI_CHASE_ENTER_RANGE_PX: f32 = 200.0;
+pub const DEFAULT_AI_CHASE_EXIT_RANGE_PX: f32 = 240.0;
+pub const DEFAULT_AI_ATTACK_ENTER_RANGE_PX: f32 = 28.0;
+pub const DEFAULT_AI_ATTACK_EXIT_RANGE_PX: f32 = 36.0;
+pub const DEFAULT_AI_ATTACK_COOLDOWN_TICKS: u32 = 60;
+pub const DEFAULT_AI_DECISION_INTERVAL_TICKS: u32 = 6;
+pub const DEFAULT_AI_MIN_DWELL_TICKS: u32 = 8;
+pub const DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX: f32 = 40.0;
+pub const DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX: f32 = 80.0;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Character {
     pub name: String,
@@ -27,6 +51,12 @@ pub struct Character {
     /// 部分的省略を許す。詳細は `CharacterPhysics` を参照。
     #[serde(default)]
     pub physics: CharacterPhysics,
+    /// AI Brain の設定 (ADR-0035)。`None` (YAML 未指定) なら AI Brain は attach されない
+    /// (= Player か、行動しない object として扱う)。`Some(Melee(cfg))` 等で engine 側が
+    /// `MeleeBrain::new(cfg)` を spawn 時に attach する。editor は `Character.ai` を編集して
+    /// YAML に書き戻すのみで、attach は engine 側責務 (ADR-0038)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiConfig>,
     // sprite_groups は Character の YAML には書き込まれず、Repository が
     // {character}/sprite-groups/*.yml を walk して populate する。
     #[serde(skip)]
@@ -118,6 +148,237 @@ impl Default for CharacterPhysics {
             },
         }
     }
+}
+
+/// Character YAML の `ai:` セクション。`kind` で AI Brain の種類を切り替える
+/// internally-tagged enum (ADR-0035 / ADR-0038)。engine 側 `AiConfig` と field 互換。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AiConfig {
+    Melee(MeleeConfig),
+    Ally(AllyConfig),
+    Bot(BotConfig),
+}
+
+impl AiConfig {
+    /// 現在の variant 識別子 (kind dropdown 用)。
+    #[must_use]
+    pub fn kind(&self) -> AiKind {
+        match self {
+            Self::Melee(_) => AiKind::Melee,
+            Self::Ally(_) => AiKind::Ally,
+            Self::Bot(_) => AiKind::Bot,
+        }
+    }
+}
+
+/// kind dropdown の選択肢。`Option<AiKind>` で None も表現する (= ai 未指定)。
+/// `AiConfig::kind()` の戻り値型として、また UI dropdown の選択肢として共用する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AiKind {
+    Melee,
+    Ally,
+    Bot,
+}
+
+impl AiKind {
+    /// dropdown 表示ラベル。`AiSection` の `<select>` で `kind.label()` を使う。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Melee => "Melee",
+            Self::Ally => "Ally",
+            Self::Bot => "Bot",
+        }
+    }
+
+    /// YAML 上の kind 値 (`#[serde(rename_all = "snake_case")]` と一致)。
+    /// dropdown の `<option value="...">` で使う。
+    #[must_use]
+    pub fn yaml_kind(self) -> &'static str {
+        match self {
+            Self::Melee => "melee",
+            Self::Ally => "ally",
+            Self::Bot => "bot",
+        }
+    }
+
+    /// 該当 variant の default 値で `AiConfig` を構築する (kind 切替時に新 variant の
+    /// default で初期化する規約、ADR-0035 Phase 5)。
+    #[must_use]
+    pub fn make_default(self) -> AiConfig {
+        match self {
+            Self::Melee => AiConfig::Melee(MeleeConfig::default()),
+            Self::Ally => AiConfig::Ally(AllyConfig::default()),
+            Self::Bot => AiConfig::Bot(BotConfig::default()),
+        }
+    }
+}
+
+/// Brain が毎 tick で target を選ぶ戦略 (ADR-0039)。各 BrainConfig の `selector` field として
+/// 持ち、engine 側 `TargetSelector` と YAML 互換。`Random` / `WeightedByThreat` は engine 側で
+/// stub (warn + Nearest fallback) だが、editor は variant 定義のみ持って YAML schema を保つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetSelector {
+    #[default]
+    Nearest,
+    LastEngaged,
+    Random,
+    WeightedByThreat,
+}
+
+impl TargetSelector {
+    /// dropdown 表示ラベル。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Nearest => "Nearest",
+            Self::LastEngaged => "Last Engaged",
+            Self::Random => "Random (stub)",
+            Self::WeightedByThreat => "Weighted by Threat (stub)",
+        }
+    }
+
+    /// YAML 上の値 (`#[serde(rename_all = "snake_case")]` と一致)。
+    #[must_use]
+    pub fn yaml_value(self) -> &'static str {
+        match self {
+            Self::Nearest => "nearest",
+            Self::LastEngaged => "last_engaged",
+            Self::Random => "random",
+            Self::WeightedByThreat => "weighted_by_threat",
+        }
+    }
+
+    /// dropdown 全 variant 一覧 (UI 側で iterate する用)。
+    #[must_use]
+    pub fn all() -> &'static [TargetSelector] {
+        &[
+            Self::Nearest,
+            Self::LastEngaged,
+            Self::Random,
+            Self::WeightedByThreat,
+        ]
+    }
+
+    /// YAML 文字列を variant に解決する (`<select>` onchange で使う)。
+    #[must_use]
+    pub fn from_yaml_value(s: &str) -> Option<Self> {
+        match s {
+            "nearest" => Some(Self::Nearest),
+            "last_engaged" => Some(Self::LastEngaged),
+            "random" => Some(Self::Random),
+            "weighted_by_threat" => Some(Self::WeightedByThreat),
+            _ => None,
+        }
+    }
+}
+
+/// Idle/Chase/Attack 周辺の FSM パラメータ (ADR-0039)。3 BrainConfig 共通で
+/// `#[serde(flatten)]` 経由で YAML 上は flat field として展開される (engine 側と同形)。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EngagementConfig {
+    #[serde(default = "default_ai_chase_enter_range_px")]
+    pub chase_enter_range_px: f32,
+    #[serde(default = "default_ai_chase_exit_range_px")]
+    pub chase_exit_range_px: f32,
+    #[serde(default = "default_ai_attack_enter_range_px")]
+    pub attack_enter_range_px: f32,
+    #[serde(default = "default_ai_attack_exit_range_px")]
+    pub attack_exit_range_px: f32,
+    #[serde(default = "default_ai_attack_cooldown_ticks")]
+    pub attack_cooldown_ticks: u32,
+    #[serde(default = "default_ai_decision_interval_ticks")]
+    pub decision_interval_ticks: u32,
+    #[serde(default = "default_ai_min_dwell_ticks")]
+    pub min_dwell_ticks: u32,
+}
+
+impl Default for EngagementConfig {
+    fn default() -> Self {
+        Self {
+            chase_enter_range_px: DEFAULT_AI_CHASE_ENTER_RANGE_PX,
+            chase_exit_range_px: DEFAULT_AI_CHASE_EXIT_RANGE_PX,
+            attack_enter_range_px: DEFAULT_AI_ATTACK_ENTER_RANGE_PX,
+            attack_exit_range_px: DEFAULT_AI_ATTACK_EXIT_RANGE_PX,
+            attack_cooldown_ticks: DEFAULT_AI_ATTACK_COOLDOWN_TICKS,
+            decision_interval_ticks: DEFAULT_AI_DECISION_INTERVAL_TICKS,
+            min_dwell_ticks: DEFAULT_AI_MIN_DWELL_TICKS,
+        }
+    }
+}
+
+/// 近接 AI (`MeleeBrain`) のパラメータ。engine 側 `MeleeConfig` と field 互換。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct MeleeConfig {
+    #[serde(flatten)]
+    pub engagement: EngagementConfig,
+    #[serde(default)]
+    pub selector: TargetSelector,
+}
+
+/// 味方 NPC AI (`AllyBrain`) のパラメータ。Engagement に加えて Player との Follow 距離
+/// hysteresis を持つ (ADR-0035 Phase 2)。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AllyConfig {
+    #[serde(flatten)]
+    pub engagement: EngagementConfig,
+    #[serde(default = "default_ai_follow_distance_min_px")]
+    pub follow_distance_min_px: f32,
+    #[serde(default = "default_ai_follow_distance_max_px")]
+    pub follow_distance_max_px: f32,
+    #[serde(default)]
+    pub selector: TargetSelector,
+}
+
+impl Default for AllyConfig {
+    fn default() -> Self {
+        Self {
+            engagement: EngagementConfig::default(),
+            follow_distance_min_px: DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX,
+            follow_distance_max_px: DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX,
+            selector: TargetSelector::default(),
+        }
+    }
+}
+
+/// Player 自動化 AI (`BotBrain`) のパラメータ (ADR-0038 Phase 4)。engine 側 `BotConfig` と
+/// field 互換。Bot 専用 param (perception / panic / replay) が必要になったら追加する。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct BotConfig {
+    #[serde(flatten)]
+    pub engagement: EngagementConfig,
+    #[serde(default)]
+    pub selector: TargetSelector,
+}
+
+const fn default_ai_chase_enter_range_px() -> f32 {
+    DEFAULT_AI_CHASE_ENTER_RANGE_PX
+}
+const fn default_ai_chase_exit_range_px() -> f32 {
+    DEFAULT_AI_CHASE_EXIT_RANGE_PX
+}
+const fn default_ai_attack_enter_range_px() -> f32 {
+    DEFAULT_AI_ATTACK_ENTER_RANGE_PX
+}
+const fn default_ai_attack_exit_range_px() -> f32 {
+    DEFAULT_AI_ATTACK_EXIT_RANGE_PX
+}
+const fn default_ai_attack_cooldown_ticks() -> u32 {
+    DEFAULT_AI_ATTACK_COOLDOWN_TICKS
+}
+const fn default_ai_decision_interval_ticks() -> u32 {
+    DEFAULT_AI_DECISION_INTERVAL_TICKS
+}
+const fn default_ai_min_dwell_ticks() -> u32 {
+    DEFAULT_AI_MIN_DWELL_TICKS
+}
+const fn default_ai_follow_distance_min_px() -> f32 {
+    DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX
+}
+const fn default_ai_follow_distance_max_px() -> f32 {
+    DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX
 }
 
 impl Character {
@@ -984,5 +1245,142 @@ mod tests {
             "default Add Box should inherit hitbox"
         );
         assert_eq!(v[0].meta, Some(AttackBoxMeta::default()));
+    }
+
+    // === AI (ADR-0035 Phase 5) ===
+
+    fn ai_yaml_character_template(ai_yaml: &str) -> String {
+        // ai 行を差し替える最小 Character YAML。
+        let header = "name: foo\nthumbnail_path: foo.png\nhp: 100\ndepth: 16\nphysics:\n  gravity: 800.0\n  jump_velocity_y: 200.0\n  knockback_threshold: 100\n  knockback_resistance: 0.0\n  bounce_count: 1\n  bounce_dampening: 0.5\n  ground_friction: 600.0\n  hit_recovery_ms: 1500\n  lie_down_duration_ms: 800\n  rise_duration_ms: 300\n  max_juggle_count: 3\n  max_down_hit_count: 3\n  guard_break_threshold: 100\n  guard_recovery_ms: 1200\n  guard_break_knockback:\n    vel_x: 100.0\n    vel_y: 150.0\n    vel_z: 0.0\n";
+        format!("{header}{ai_yaml}")
+    }
+
+    #[test]
+    fn melee_config_default_matches_engine_constants() {
+        let c = MeleeConfig::default();
+        assert!(
+            (c.engagement.chase_enter_range_px - DEFAULT_AI_CHASE_ENTER_RANGE_PX).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (c.engagement.chase_exit_range_px - DEFAULT_AI_CHASE_EXIT_RANGE_PX).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (c.engagement.attack_enter_range_px - DEFAULT_AI_ATTACK_ENTER_RANGE_PX).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (c.engagement.attack_exit_range_px - DEFAULT_AI_ATTACK_EXIT_RANGE_PX).abs()
+                < f32::EPSILON
+        );
+        assert_eq!(
+            c.engagement.attack_cooldown_ticks,
+            DEFAULT_AI_ATTACK_COOLDOWN_TICKS
+        );
+        assert_eq!(
+            c.engagement.decision_interval_ticks,
+            DEFAULT_AI_DECISION_INTERVAL_TICKS
+        );
+        assert_eq!(c.engagement.min_dwell_ticks, DEFAULT_AI_MIN_DWELL_TICKS);
+        assert_eq!(c.selector, TargetSelector::Nearest);
+    }
+
+    #[test]
+    fn ally_config_default_includes_follow_range() {
+        let c = AllyConfig::default();
+        assert!(
+            (c.follow_distance_min_px - DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX).abs() < f32::EPSILON
+        );
+        assert!(
+            (c.follow_distance_max_px - DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX).abs() < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn bot_config_default_matches_melee() {
+        let b = BotConfig::default();
+        let m = MeleeConfig::default();
+        assert_eq!(b.engagement, m.engagement);
+        assert_eq!(b.selector, m.selector);
+    }
+
+    #[test]
+    fn character_ai_none_round_trip() -> anyhow::Result<()> {
+        let yaml = ai_yaml_character_template("");
+        let c: Character = serde_saphyr::from_str(&yaml)?;
+        assert!(c.ai.is_none());
+        let back = serde_saphyr::to_string(&c)?;
+        assert!(!back.contains("ai:"));
+        Ok(())
+    }
+
+    #[test]
+    fn character_ai_melee_round_trip() -> anyhow::Result<()> {
+        let yaml = ai_yaml_character_template(
+            "ai:\n  kind: melee\n  chase_enter_range_px: 200.0\n  chase_exit_range_px: 240.0\n  attack_enter_range_px: 28.0\n  attack_exit_range_px: 36.0\n  attack_cooldown_ticks: 60\n  decision_interval_ticks: 6\n  min_dwell_ticks: 8\n",
+        );
+        let c: Character = serde_saphyr::from_str(&yaml)?;
+        let Some(AiConfig::Melee(cfg)) = c.ai.as_ref() else {
+            panic!("expected Melee");
+        };
+        assert_eq!(*cfg, MeleeConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn character_ai_ally_round_trip() -> anyhow::Result<()> {
+        let yaml = ai_yaml_character_template(
+            "ai:\n  kind: ally\n  follow_distance_min_px: 40.0\n  follow_distance_max_px: 80.0\n  chase_enter_range_px: 200.0\n  chase_exit_range_px: 240.0\n  attack_enter_range_px: 28.0\n  attack_exit_range_px: 36.0\n  attack_cooldown_ticks: 60\n  decision_interval_ticks: 6\n  min_dwell_ticks: 8\n",
+        );
+        let c: Character = serde_saphyr::from_str(&yaml)?;
+        let Some(AiConfig::Ally(cfg)) = c.ai.as_ref() else {
+            panic!("expected Ally");
+        };
+        assert_eq!(*cfg, AllyConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn character_ai_bot_round_trip() -> anyhow::Result<()> {
+        let yaml = ai_yaml_character_template("ai:\n  kind: bot\n  attack_cooldown_ticks: 30\n");
+        let c: Character = serde_saphyr::from_str(&yaml)?;
+        let Some(AiConfig::Bot(cfg)) = c.ai.as_ref() else {
+            panic!("expected Bot");
+        };
+        assert_eq!(cfg.engagement.attack_cooldown_ticks, 30);
+        // 残り field は default にフォールバック (serde(default) 経由)。
+        assert_eq!(
+            cfg.engagement.decision_interval_ticks,
+            DEFAULT_AI_DECISION_INTERVAL_TICKS
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn melee_config_with_selector_round_trip() -> anyhow::Result<()> {
+        let yaml = ai_yaml_character_template("ai:\n  kind: melee\n  selector: last_engaged\n");
+        let c: Character = serde_saphyr::from_str(&yaml)?;
+        let Some(AiConfig::Melee(cfg)) = c.ai.as_ref() else {
+            panic!("expected Melee");
+        };
+        assert_eq!(cfg.selector, TargetSelector::LastEngaged);
+        Ok(())
+    }
+
+    #[test]
+    fn ai_kind_make_default_returns_kind_specific_variant() {
+        assert_eq!(AiKind::Melee.make_default().kind(), AiKind::Melee);
+        assert_eq!(AiKind::Ally.make_default().kind(), AiKind::Ally);
+        assert_eq!(AiKind::Bot.make_default().kind(), AiKind::Bot);
+    }
+
+    #[test]
+    fn target_selector_from_yaml_value_round_trip() {
+        for s in TargetSelector::all() {
+            let yaml = s.yaml_value();
+            assert_eq!(TargetSelector::from_yaml_value(yaml), Some(*s));
+        }
+        assert_eq!(TargetSelector::from_yaml_value("unknown"), None);
     }
 }

@@ -480,6 +480,58 @@ Side / Controller marker 分離 + Enemy → Ally 対称化 + `AiConfig::Bot` YAM
 HUD ally HP bar / KO 演出 / engagement-link / icon HUD などの HUD 系対称化は本 Phase 4 で
 扱わない (= ADR-0030/0031/0032/0033 の Phase 補追として別 Issue で実装)。
 
+## Phase 5 補追 (2026-06-28): editor UI で `AiConfig` を編集可能にする (Issue #8)
+
+ADR-0038 (Side / Controller marker 分離) + ADR-0039 (Brain trait + TargetSelector) で
+`AiConfig` schema (3 variant × `EngagementConfig` 7 field + Ally の Follow 2 field +
+`TargetSelector` 4 variant) が固まったので、editor (`packages/editor-desktop`) から
+GUI で編集可能にする。
+
+### 採用した UI パターン
+
+`Character` 詳細画面の `Properties` エリア下に **`AI Brain` collapsible section** を 1 つ
+追加し、`PhysicsSection` と同形の `dl` グリッドで以下を並べる:
+
+- **Kind dropdown** (`<select>`): `(none)` / `Melee` / `Ally` / `Bot` の 4 択。none で
+  `Character.ai = None`、それ以外で当該 variant の `default()` を入れる
+- **Target Selector dropdown**: `TargetSelector` 4 variant (Random / WeightedByThreat は
+  「(stub)」表記で UI 上明示するが選択 + 保存は可能 — ADR-0039 規約)
+- **Engagement field grid**: `chase_enter/exit` / `attack_enter/exit` (f32 px、4 行) +
+  `attack_cooldown` / `decision_interval` / `min_dwell` (u32 tick、3 行)
+- **Follow field grid (Ally のみ)**: `follow_distance_min/max_px` (f32 px、2 行)
+
+field 単位は `EditPhysicsF32Inline` / `EditPhysicsU32Inline` と同じ「✎ / Save / Cancel」の
+inline 編集 pattern を踏襲。書き込みは `CharacterRepository::update_metadata` で
+`{character_name}.yml` だけを差し替える (sprite-groups/ animations/ には触らない)。
+
+### kind 切替時は新 variant の `default()` で初期化する (引き継ぎなし)
+
+例: Melee → Ally に切り替えると `EngagementConfig` の値も含めて `AllyConfig::default()` で
+書き直される (= 元の `chase_enter_range_px` 等は引き継がれない)。理由:
+
+- Ally → Melee で `follow_distance_*` を silently 落とすことになる
+- Brain ごとの調律値 (例: Bot は短い decision_interval が望ましい等) が混入して予測不能
+- ユーザーが「同じ値を引き継ぎたい」場合は kind 切替前に値をメモ → 切替後に再入力で済む
+
+### editor 側 `DEFAULT_AI_*` の二重定義
+
+editor の `entities/character/model.rs` に **engine と同値**の `DEFAULT_AI_*` 定数群を
+再定義する。本プロジェクトの規約 (= editor / engine は独立、共通化は両者が熟れてから探す、
+[memory: dedup_later]) に従い、shared crate に切り出すのは見送る。default 値の同期は ADR-0035
+本文の数値 (Phase 1.1 で hard-code、Phase 1.2 で YAML 化したもの) に揃え、engine 側変更時は
+本 ADR の数値と editor / engine の定数 3 箇所を同時に更新する規約とする。
+
+### Yaranai (Phase 5 では扱わない)
+
+- **preview / hot-reload** — editor で値を変えたら runtime engine にも live 反映、は別 Issue
+  送り (data-flow.md 参照)。本 Phase 5 では「YAML を編集 → engine を再起動」が前提
+- **新 Character 作成時の AI 既定 attach** — `CreateCharacterButton` 経由の create では
+  `ai: None` を維持。AI が要るキャラは編集画面から後付けで設定する
+- **stub variant の挙動実装** — `Random` / `WeightedByThreat` を選んで保存自体は可能だが、
+  engine 側挙動は引き続き warn + Nearest fallback (ADR-0039 規約)
+- **OOUI 的 wizard** — 「kind を選ぶと適切な default が候補表示される」等の補助 UI は不要、
+  単純 dropdown + flat field grid で足りる
+
 ## 関連
 
 - [ADR-0030](0030-multi-player-hud-targeting.md): `Player(PlayerId)`、`ActionMap` の Player

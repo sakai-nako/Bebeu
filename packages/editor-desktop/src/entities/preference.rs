@@ -1,5 +1,5 @@
 mod model;
-pub use model::{Preferences, Theme};
+pub use model::{Locale, Preferences, Theme};
 
 mod api;
 pub use api::{
@@ -7,4 +7,4 @@ pub use api::{
 };
 
 mod provider;
-pub use provider::{use_preferences, use_preferences_provider};
+pub use provider::{use_preferences, use_preferences_provider, use_t, use_t_args};

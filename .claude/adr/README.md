@@ -45,6 +45,8 @@ ADR は前身リポジトリ `local-game-workspace` (Go + ebitengine engine, Rus
 | 0038 | [キャラクター marker を Side / Controller 2 軸に分離する](0038-side-controller-marker-separation.md) | Accepted |
 | 0039 | [Brain trait + TargetSelector enum で 3 Brain を宣言的に組む](0039-brain-trait-and-target-selector.md) | Accepted |
 | 0040 | [Public mirror GitHub Releases zip 配布の構造](0040-public-mirror-github-releases-distribution.md) | Accepted |
+| 0041 | [ユーザー側設定の永続化に Bevy 0.19 App Settings を採用](0041-user-settings-via-bevy-app-settings.md) | Accepted |
+| 0042 | [editor UI の i18n に rust-i18n を採用し locale を Preferences に持たせる](0042-editor-i18n-with-rust-i18n-and-preferences-locale.md) | Accepted |
 
 > 0030-0037 はテーブル未追記 (= 過去追記漏れ)。詳細は `ls .claude/adr/` を参照。
 

@@ -1,2 +1,2 @@
 mod ui;
-pub use ui::{ChangeThemeSelect, EditHistoryCapacity, ResetPreferencesButton};
+pub use ui::{ChangeLocaleSelect, ChangeThemeSelect, EditHistoryCapacity, ResetPreferencesButton};

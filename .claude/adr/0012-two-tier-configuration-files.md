@@ -50,6 +50,17 @@ editor が起動時 / 実行中に必要とする設定情報が 2 種類ある:
 - 不在 / parse 失敗のいずれも warn ログを出して `Preferences::default()` を返す（`entities/preference/api.rs::FilesystemPreferencesRepository::load`）
 - 既存 yml に新規フィールドが追加されたケースは `#[serde(default)]` でフィールド単位に default 補完する（`KeyBindings` 追加時の前方互換）
 
+#### 補追 (2026-06-29、ADR-0042): `locale: Locale` フィールド追加
+
+editor UI の表示言語を表す `locale: Locale` (Ja / En) を `Preferences` に追加した
+(Issue #30 Phase 1)。`#[serde(default)]` で既存 yml は `Locale::default()` = `Ja` に補完される
+(既存ユーザーは日本語のまま、上書きされない)。
+
+例外として **ファイル不在分岐** では `FilesystemPreferencesRepository::load` 内で
+`shared::detect_default_locale()` を呼び OS locale から ja / en を推定する。初回起動時のみ
+sys_locale を読む形にして、テストや InMemory 経路では sys_locale を踏まないようにしている。
+詳細は ADR-0042。
+
 ### 例外: テスト / CI
 
 `InMemoryCharacterRepository` / `InMemoryPreferencesRepository` をテスト用に用意し、disk を一切触らずに Repository contract を検証する（→ ADR-0011）。
@@ -96,6 +107,7 @@ editor が起動時 / 実行中に必要とする設定情報が 2 種類ある:
 ## 関連
 
 - ADR-0011: Filesystem YAML を primary storage にする（`serde_saphyr` の選択を共有）
+- ADR-0042: editor UI の i18n に rust-i18n を採用し locale を Preferences に持たせる（本 ADR の `locale` 補追）
 - `shared/config.rs`: `local-gw.yml` のロード実装
 - `entities/preference/api.rs`: `preferences.yml` の Repository 実装と fail-soft フォールバック
 - `entities/preference/README.md`: `Preferences` フィールド一覧と直接 Signal 共有パターン

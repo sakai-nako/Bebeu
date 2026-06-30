@@ -9,3 +9,7 @@ pub(crate) mod entities;
 pub(crate) mod features;
 pub(crate) mod scenes;
 pub(crate) mod shared;
+
+// ADR-0041 — smoke test が `init_resource::<AudioSettings>()` で本番 SettingsPlugin
+// 経由の挿入を代替できるよう、ユーザー設定の Resource 型のみ再公開する。
+pub use shared::settings::{AudioSettings, WindowSettings};

@@ -7,6 +7,7 @@
 | フィールド | 型 | 由来 | 備考 |
 |---|---|---|---|
 | `theme` | `Theme` (Emerald / Dark) | `model.rs` | daisyUI のテーマと対応。`app_root.rs` で `data-theme` 属性に反映 |
+| `locale` | `Locale` (Ja / En) | `shared/i18n.rs` (re-export) | editor UI の表示言語。`app_root.rs` で `rust_i18n::set_locale` に反映 (→ ADR-0042) |
 | `view_controls` | `ViewControlBindings` | `shared/view_controls.rs` | パン用マウスボタン / ホイール反転。Zoom 倍率は固定リスト (`ZOOM_LEVELS`) を階段する方式でユーザー設定にしない (sprite が subpixel 位置に着地して frame 切替で半 px ずれて見えるのを防ぐため) |
 | `key_bindings` | `KeyBindings` | `entities/keybinding/` | Action → KeyBinding マップ。グローバル listener と Preferences 編集 UI が参照 (→ ADR-0009) |
 | `sprite_group_history_capacity` | `u32` | `model.rs` | SpriteGroup Editor の Undo 履歴上限ステップ数（デフォルト 50） |
@@ -18,9 +19,9 @@
 
 | ファイル | Segment | 役割 |
 |---|---|---|
-| `model.rs` | model | `Preferences` / `Theme` |
-| `api.rs` | api | `PreferencesRepository` trait + InMemory + Filesystem |
-| `provider.rs` | api 補助 | `Signal<Preferences>` を context で配布する hook |
+| `model.rs` | model | `Preferences` / `Theme` (Locale は `shared::Locale` の re-export) |
+| `api.rs` | api | `PreferencesRepository` trait + InMemory + Filesystem (ファイル不在時のみ OS locale 検出) |
+| `provider.rs` | api 補助 | `Signal<Preferences>` を context で配布する hook + reactive 翻訳 `use_t` / `use_t_args` |
 
 ## Character 集約との設計上の違い
 

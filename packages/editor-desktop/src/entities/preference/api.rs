@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
+use crate::shared::detect_default_locale;
+
 use super::Preferences;
 
 const APP_DIR_NAME: &str = "local-game-editor";
@@ -79,7 +81,12 @@ impl FilesystemPreferencesRepository {
 impl PreferencesRepository for FilesystemPreferencesRepository {
     fn load(&self) -> Result<Preferences> {
         if !self.path.exists() {
-            return Ok(Preferences::default());
+            // 初回起動: OS locale から推定。既存ユーザーには影響しない (下の serde 経路で
+            // ファイル存在時は `Locale::default()` = Ja に固定される)。
+            return Ok(Preferences {
+                locale: detect_default_locale(),
+                ..Preferences::default()
+            });
         }
         let content = match fs::read_to_string(&self.path) {
             Ok(c) => c,
@@ -151,10 +158,16 @@ mod tests {
 
     #[test]
     fn filesystem_load_returns_default_when_file_missing() -> Result<()> {
+        // ファイル不在時は OS locale 検出が走るので locale 以外を default と比較する (ADR-0042)。
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("does-not-exist.yml");
         let repo = FilesystemPreferencesRepository::from_path(path);
-        assert_eq!(repo.load()?, Preferences::default());
+        let loaded = repo.load()?;
+        let expected = Preferences {
+            locale: loaded.locale,
+            ..Preferences::default()
+        };
+        assert_eq!(loaded, expected);
         Ok(())
     }
 

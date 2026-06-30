@@ -1,12 +1,14 @@
 use dioxus::prelude::*;
 
+use crate::entities::preference::use_t;
 use crate::widgets::project::ProjectDetail;
 
 #[component]
 pub fn ProjectsIndex() -> Element {
+    let t = use_t();
     rsx! {
         div { class: "h-full flex items-center justify-center text-base-content/50",
-            "サイドバーから Project を選択してください。"
+            "{t(\"projects.index_empty_hint\")}"
         }
     }
 }

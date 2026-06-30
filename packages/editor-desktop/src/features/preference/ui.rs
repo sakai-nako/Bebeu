@@ -1,3 +1,6 @@
+mod change_locale;
+pub use change_locale::ChangeLocaleSelect;
+
 mod change_theme;
 pub use change_theme::ChangeThemeSelect;
 

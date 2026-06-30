@@ -1,11 +1,15 @@
-//! Options scene — gameplay action のキーコンフィグ画面 (Phase 4)。
+//! Options scene — gameplay action のキーコンフィグ + master volume 画面 (Phase 4)。
 //!
 //! 機能:
 //! - 8 Action (MoveLeft / MoveRight / ... / Guard) のバインドを表示
 //! - 項目選択 (Up/Down) → Confirm で **編集モード** に入り、押された KeyCode で置換
 //!   (1 Action = 1 KeyCode の単純化、複数 bind は yml 直編集に委ねる)
-//! - 「Reset to default」で `ActionMap::default` のバインドに戻す (まだ commit はされない)
+//! - **Master Volume** 行 (ADR-0041) — Browse 中 Left/Right で 0.0-1.0 を 0.05 刻みで増減、
+//!   debounce save (App Settings)。Confirm は何も起きない (キャプチャ対象外)
+//! - 「Reset to default」で `ActionMap::default` のバインドに戻す (まだ commit はされない)。
+//!   Master Volume はリセット対象外 (Browse 中 Left/Right で 0/100% へ振り直せる)
 //! - 「Back」で **編集中の bind を `ActionMap` に commit + `input.yml` に save** して Title へ
+//!   (Master Volume は変更時点で App Settings に debounce save 済みなので Back では追加処理なし)
 //! - Browse 中の Esc は **編集を破棄** して Title へ (= `EditingActionMap` は捨てる)
 //! - 編集中の Esc は **キャプチャだけ抜ける** (binding は変えない)
 //!
@@ -14,21 +18,29 @@
 //!   Reset で書き換わり、Back で `ActionMap` (Resource) に commit される。
 //! - [`KeyConfigMode`] — `Browse` か `EditingAction(Action)` の二値。enum 状態。
 //! - [`OptionsMenuSelection`] — 現在ハイライト中の行 index (0..[`MENU_ITEM_COUNT`])。
+//! - `AudioSettings` (`shared/settings.rs`) — Master Volume の永続化先 Resource。
+//!   Options scene 内で直接 mutate + `SaveSettingsDeferred` を queue する。
 //!
 //! UI は state_debug / title と同じ `FINAL_PASS_LAYER` (= window 解像度) に Text2d で出す。
+use std::time::Duration;
+
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
+use bevy::settings::SaveSettingsDeferred;
 use bevy::sprite::Anchor;
 
 use crate::app::{FINAL_PASS_LAYER, SceneState};
+use crate::shared::settings::AudioSettings;
 use crate::shared::{
     Action, ActionMap, MenuAction, key_code_to_str, menu_action_just_pressed, write_input_yml,
 };
 
-/// 全 10 行: 8 Action + Reset + Back。
-const MENU_ITEM_COUNT: usize = Action::ALL.len() + 2;
-/// Reset 行の index ([`Action::ALL`] の直後)。
-const RESET_INDEX: usize = Action::ALL.len();
+/// 全 11 行: 8 Action + Master Volume + Reset + Back。
+const MENU_ITEM_COUNT: usize = Action::ALL.len() + 3;
+/// Master Volume 行の index ([`Action::ALL`] の直後)。
+const MASTER_VOLUME_INDEX: usize = Action::ALL.len();
+/// Reset 行の index ([`MASTER_VOLUME_INDEX`] の直後)。
+const RESET_INDEX: usize = MASTER_VOLUME_INDEX + 1;
 /// Back 行の index ([`RESET_INDEX`] の直後)。
 const BACK_INDEX: usize = RESET_INDEX + 1;
 
@@ -42,16 +54,23 @@ const HEADING_Y: f32 = 130.0;
 const HEADING_FONT_SIZE: f32 = 28.0;
 const ROW_FONT_SIZE: f32 = 16.0;
 const PROMPT_FONT_SIZE: f32 = 14.0;
-/// 各行の y 間隔 (px)。10 行で ±100 px 程度に収まるよう 22 px に。
-const ROW_SPACING_Y: f32 = 22.0;
+/// 各行の y 間隔 (px)。11 行で ±110 px 程度に収まるよう 20 px に縮小 (ADR-0041 で
+/// Master Volume 行を追加した際に Press Any Key prompt と近接化したため、ここで補正)。
+const ROW_SPACING_Y: f32 = 20.0;
 /// 1 行目 (i=0) の y 位置 (px)。
 const ROW_START_Y: f32 = 80.0;
-/// Press Any Key prompt の y 位置 (画面下寄せ)。
-const PROMPT_Y: f32 = -190.0;
-/// 左カラム (Action 名) の左端 x 位置 (Text2d を左揃え anchor で配置)。
+/// Press Any Key prompt の y 位置 (画面下寄せ)。MasterVolume 行追加分だけ余裕を持って下げた。
+const PROMPT_Y: f32 = -200.0;
+/// 左カラム (Action 名 / Master Volume ラベル) の左端 x 位置 (Text2d を左揃え anchor で配置)。
 const COL_LABEL_X: f32 = -140.0;
-/// 右カラム (バインド表示) の左端 x 位置。Action 名最長 (`down_attack`) と + 余白で決定。
+/// 右カラム (バインド表示 / Master Volume 値表示) の左端 x 位置。
+/// Action 名最長 (`down_attack`) + 余白で決定。
 const COL_BINDING_X: f32 = -30.0;
+
+/// Master Volume 調整の 1 step (`Left` / `Right` 1 押下あたりの増減幅)。
+const MASTER_VOLUME_STEP: f32 = 0.05;
+/// Master Volume 変更後の debounce 保存遅延 (ADR-0041)。
+const MASTER_VOLUME_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// この scene が生存中だけ存在する、編集中の [`ActionMap`]。OnEnter で `ActionMap`
 /// のクローン、OnExit で remove。Back で `ActionMap` に commit される。
@@ -79,6 +98,7 @@ struct OptionsSceneEntity;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum OptionsMenuRow {
     Action(Action),
+    MasterVolume,
     Reset,
     Back,
 }
@@ -88,6 +108,7 @@ impl OptionsMenuRow {
     fn index(self) -> usize {
         match self {
             Self::Action(a) => action_index(a),
+            Self::MasterVolume => MASTER_VOLUME_INDEX,
             Self::Reset => RESET_INDEX,
             Self::Back => BACK_INDEX,
         }
@@ -97,6 +118,11 @@ impl OptionsMenuRow {
 /// 右カラム (バインド表示) の Text2d marker。Action ごとに 1 つ存在。
 #[derive(Component)]
 struct OptionsBindingLabel(Action);
+
+/// 右カラム (Master Volume 値表示) の Text2d marker。`AudioSettings.master_volume` を
+/// `%` で表示する。
+#[derive(Component)]
+struct MasterVolumeValueLabel;
 
 /// 編集モード中だけ Visible にする「Press any key...」prompt。
 #[derive(Component)]
@@ -116,6 +142,7 @@ fn row_at_index(index: usize) -> Option<OptionsMenuRow> {
         return Some(OptionsMenuRow::Action(action));
     }
     match index {
+        MASTER_VOLUME_INDEX => Some(OptionsMenuRow::MasterVolume),
         RESET_INDEX => Some(OptionsMenuRow::Reset),
         BACK_INDEX => Some(OptionsMenuRow::Back),
         _ => None,
@@ -136,7 +163,9 @@ impl Plugin for OptionsScenePlugin {
                     handle_navigation,
                     handle_confirm,
                     handle_cancel,
+                    handle_master_volume_adjust,
                     update_binding_labels,
+                    update_master_volume_label,
                     update_row_visuals,
                     update_prompt_visibility,
                 )
@@ -147,7 +176,8 @@ impl Plugin for OptionsScenePlugin {
     }
 }
 
-fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
+#[allow(clippy::too_many_lines)]
+fn setup(mut commands: Commands, action_map: Res<ActionMap>, audio_settings: Res<AudioSettings>) {
     tracing::info!("options: enter");
     commands.insert_resource(EditingActionMap(action_map.clone()));
     commands.insert_resource(KeyConfigMode::default());
@@ -198,9 +228,39 @@ fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
         ));
     }
 
-    // Reset / Back 行は中央配置。
+    // Master Volume 行 (ADR-0041) — Action 群から半行下げて区切りを付ける。
+    // 左に "master_volume" ラベル、右に "{:.0}%" の値表示。
     #[allow(clippy::cast_precision_loss)]
-    let reset_y = ROW_START_Y - (RESET_INDEX as f32) * ROW_SPACING_Y - ROW_SPACING_Y * 0.5;
+    let master_y = ROW_START_Y - (MASTER_VOLUME_INDEX as f32) * ROW_SPACING_Y - ROW_SPACING_Y * 0.5;
+    commands.spawn((
+        Text2d::new("master_volume"),
+        TextFont {
+            font_size: FontSize::Px(ROW_FONT_SIZE),
+            ..default()
+        },
+        TextColor(COLOR_NORMAL),
+        Anchor(Vec2::new(-0.5, 0.0)),
+        Transform::from_xyz(COL_LABEL_X, master_y, 100.0),
+        RenderLayers::layer(FINAL_PASS_LAYER),
+        OptionsSceneEntity,
+        OptionsMenuRow::MasterVolume,
+    ));
+    commands.spawn((
+        Text2d::new(format_master_volume(audio_settings.master_volume)),
+        TextFont {
+            font_size: FontSize::Px(ROW_FONT_SIZE),
+            ..default()
+        },
+        TextColor(COLOR_NORMAL),
+        Anchor(Vec2::new(-0.5, 0.0)),
+        Transform::from_xyz(COL_BINDING_X, master_y, 100.0),
+        RenderLayers::layer(FINAL_PASS_LAYER),
+        OptionsSceneEntity,
+        MasterVolumeValueLabel,
+    ));
+
+    // Reset / Back 行は中央配置。MasterVolume 行とさらに半行余白を空ける。
+    let reset_y = master_y - ROW_SPACING_Y - ROW_SPACING_Y * 0.5;
     commands.spawn((
         Text2d::new("Reset to default"),
         TextFont {
@@ -213,7 +273,6 @@ fn setup(mut commands: Commands, action_map: Res<ActionMap>) {
         OptionsSceneEntity,
         OptionsMenuRow::Reset,
     ));
-    #[allow(clippy::cast_precision_loss)]
     let back_y = reset_y - ROW_SPACING_Y;
     commands.spawn((
         Text2d::new("Back (save & return)"),
@@ -304,13 +363,17 @@ fn handle_confirm(
             tracing::info!(?action, "options: enter edit mode");
             *mode = KeyConfigMode::EditingAction(action);
         }
+        OptionsMenuRow::MasterVolume => {
+            // 音量は Left/Right で増減する slider 扱いなので Confirm は no-op。
+        }
         OptionsMenuRow::Reset => {
             editing.0 = ActionMap::default();
             tracing::info!("options: editing map reset to defaults");
         }
         OptionsMenuRow::Back => {
             // 編集中のバインドを ActionMap (Resource) に commit し、yml にも永続化。
-            // 次フレームから gameplay system が新しい bind で動く。
+            // 次フレームから gameplay system が新しい bind で動く。Master Volume は
+            // 変更時点で App Settings に debounce save 済みなので追加処理は不要。
             commit_to_action_map_and_save(&editing.0, &mut action_map);
             next.set(SceneState::Title);
         }
@@ -390,6 +453,62 @@ fn update_binding_labels(
     for (label, mut text) in &mut query {
         text.0 = format_bindings(&editing.0, label.0);
     }
+}
+
+/// Browse 中 + Master Volume 行選択中 + ArrowLeft / ArrowRight で master_volume を
+/// `MASTER_VOLUME_STEP` 刻みで増減し、`SaveSettingsDeferred` を queue する (ADR-0041)。
+/// menu_action ではなく KeyCode を直接見るのは、Left/Right が menu 系に存在しない & 別行
+/// (Action 行など) で誤発火させないため。
+fn handle_master_volume_adjust(
+    keys: Res<ButtonInput<KeyCode>>,
+    selection: Res<OptionsMenuSelection>,
+    mode: Res<KeyConfigMode>,
+    mut audio_settings: ResMut<AudioSettings>,
+    mut commands: Commands,
+) {
+    if *mode != KeyConfigMode::Browse {
+        return;
+    }
+    if selection.0 != MASTER_VOLUME_INDEX {
+        return;
+    }
+    let mut delta = 0.0;
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        delta += MASTER_VOLUME_STEP;
+    }
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        delta -= MASTER_VOLUME_STEP;
+    }
+    if delta == 0.0 {
+        return;
+    }
+    let next = (audio_settings.master_volume + delta).clamp(0.0, 1.0);
+    if (next - audio_settings.master_volume).abs() < f32::EPSILON {
+        return;
+    }
+    audio_settings.master_volume = next;
+    tracing::info!(master_volume = next, "options: master_volume adjusted");
+    commands.queue(SaveSettingsDeferred(MASTER_VOLUME_SAVE_DEBOUNCE));
+}
+
+/// `AudioSettings.master_volume` の変化を右カラム label に反映する。
+fn update_master_volume_label(
+    audio_settings: Res<AudioSettings>,
+    mut query: Query<&mut Text2d, With<MasterVolumeValueLabel>>,
+) {
+    if !audio_settings.is_changed() {
+        return;
+    }
+    for mut text in &mut query {
+        text.0 = format_master_volume(audio_settings.master_volume);
+    }
+}
+
+/// `0.0-1.0` の master_volume を `"100%"` のような表示文字列に整形する。
+fn format_master_volume(master_volume: f32) -> String {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let percent = (master_volume * 100.0).round() as u32;
+    format!("{percent}%")
 }
 
 fn update_row_visuals(

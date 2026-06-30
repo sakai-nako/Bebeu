@@ -1,16 +1,21 @@
 use dioxus::prelude::*;
 
+use crate::entities::preference::use_t;
 use crate::features::keybinding::EditKeyBindings;
-use crate::features::preference::{ChangeThemeSelect, EditHistoryCapacity, ResetPreferencesButton};
+use crate::features::preference::{
+    ChangeLocaleSelect, ChangeThemeSelect, EditHistoryCapacity, ResetPreferencesButton,
+};
 
 #[component]
 pub fn PreferencesModal(onclose: EventHandler<()>) -> Element {
+    let t = use_t();
     rsx! {
         dialog { class: "modal modal-open",
             div { class: "modal-box",
-                h3 { class: "text-lg font-bold mb-4", "Preferences" }
+                h3 { class: "text-lg font-bold mb-4", "{t(\"preferences.title\")}" }
 
                 div { class: "space-y-4",
+                    ChangeLocaleSelect {}
                     ChangeThemeSelect {}
                     EditHistoryCapacity {}
                     ResetPreferencesButton {}
@@ -22,7 +27,7 @@ pub fn PreferencesModal(onclose: EventHandler<()>) -> Element {
                         r#type: "button",
                         class: "btn btn-primary",
                         onclick: move |_| onclose.call(()),
-                        "閉じる"
+                        "{t(\"preferences.close\")}"
                     }
                 }
             }

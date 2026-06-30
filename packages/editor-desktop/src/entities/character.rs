@@ -1,7 +1,12 @@
 mod model;
 pub use model::{
-    Animation, BoxKind, Character, CharacterPhysics, DEFAULT_CHARACTER_DEPTH, Frame, FrameSound,
-    Layer, SelectedBox, Sound, SoundGroup, Sprite, SpriteGroup,
+    AiConfig, AiKind, AllyConfig, Animation, BotConfig, BoxKind, Character, CharacterPhysics,
+    DEFAULT_AI_ATTACK_COOLDOWN_TICKS, DEFAULT_AI_ATTACK_ENTER_RANGE_PX,
+    DEFAULT_AI_ATTACK_EXIT_RANGE_PX, DEFAULT_AI_CHASE_ENTER_RANGE_PX,
+    DEFAULT_AI_CHASE_EXIT_RANGE_PX, DEFAULT_AI_DECISION_INTERVAL_TICKS,
+    DEFAULT_AI_FOLLOW_DISTANCE_MAX_PX, DEFAULT_AI_FOLLOW_DISTANCE_MIN_PX,
+    DEFAULT_AI_MIN_DWELL_TICKS, DEFAULT_CHARACTER_DEPTH, EngagementConfig, Frame, FrameSound,
+    Layer, MeleeConfig, SelectedBox, Sound, SoundGroup, Sprite, SpriteGroup, TargetSelector,
 };
 
 mod role;

@@ -4,6 +4,9 @@ pub use character_detail::CharacterDetail;
 mod physics_section;
 pub use physics_section::PhysicsSection;
 
+mod ai_section;
+pub use ai_section::AiSection;
+
 mod characters_sidebar;
 pub use characters_sidebar::CharactersSidebar;
 

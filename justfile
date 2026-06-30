@@ -102,10 +102,11 @@ editor-desktop-css: editor-desktop-deps
     npx @tailwindcss/cli -i tailwind.css -o assets/tailwind.css --minify
 alias ed-d-css := editor-desktop-css
 
+# 開発用。dx serve で hot reload。新規 Tailwind class を追加したら
+# 別 shell で `just ed-d-css` を 1 回回す (assets/tailwind.css 更新で hot reload)。
 [group("editor-desktop")]
 [working-directory: "packages/editor-desktop"]
 editor-desktop-dev *args: editor-desktop-deps
-    npx @tailwindcss/cli -i tailwind.css -o assets/tailwind.css --watch &
     dx serve --platform desktop {{ args }}
 alias ed-d-dev := editor-desktop-dev
 

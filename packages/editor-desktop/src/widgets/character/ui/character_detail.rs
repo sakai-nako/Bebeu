@@ -10,7 +10,7 @@ use crate::features::character::{
 };
 use crate::shared::workspace_asset_url;
 
-use super::PhysicsSection;
+use super::{AiSection, PhysicsSection};
 
 #[component]
 pub fn CharacterDetail(character: Character) -> Element {
@@ -84,6 +84,9 @@ pub fn CharacterDetail(character: Character) -> Element {
             // Physics セクション (重力 / ジャンプ / Knockback / バウンス / 摩擦 / timer)。
             // 通常は閉じておく (作家が初期に触る頻度は低いため)、必要時に展開する。
             PhysicsSection { character: character.clone() }
+
+            // AI Brain セクション (ADR-0035 Phase 5)。kind / selector / engagement / follow を編集。
+            AiSection { character: character.clone() }
 
             // Sub-aggregates: Sprite Groups + Animations + Sound Groups
             div { class: "flex flex-wrap gap-4",

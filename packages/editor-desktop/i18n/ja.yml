@@ -1,0 +1,20 @@
+_meta:
+  language_name: 日本語
+
+app:
+  startup_error_title: 起動エラー
+  startup_error_message: "設定の読み込みに失敗しました: %{error}"
+  unexpected_error: 予期しないエラーが発生しました
+
+projects:
+  index_empty_hint: サイドバーから Project を選択してください。
+
+preferences:
+  title: Preferences
+  close: 閉じる
+  theme: テーマ
+  theme_unknown: "未知のテーマ: %{value}"
+  locale: 言語
+  locale_unknown: "未知の言語: %{value}"
+  locale_ja: 日本語
+  locale_en: English (英語)

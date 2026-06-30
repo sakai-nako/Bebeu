@@ -125,6 +125,7 @@ fn CreateCharacterModal(onclose: EventHandler<()>) -> Element {
             depth: DEFAULT_CHARACTER_DEPTH,
             tag: None,
             physics: CharacterPhysics::default(),
+            ai: None,
             sprite_groups,
             animations: Vec::new(),
             sound_groups: Vec::new(),

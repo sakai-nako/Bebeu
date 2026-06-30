@@ -19,10 +19,16 @@ use crate::entities::preference::{
 use crate::entities::project::{
     FilesystemProjectRepository, ProjectRepository, use_projects_refresh_provider,
 };
-use crate::shared::{Config, ToastHost, use_toast_provider};
+use crate::shared::{
+    Config, ToastHost, apply_locale, detect_default_locale, translate, translate_args,
+    use_toast_provider,
+};
 
 #[component]
 pub fn AppRoot() -> Element {
+    // Preferences をロードする前 (Config エラー含む) でも翻訳が効くように OS locale で初期化。
+    // Preferences ロード後は AppMain の use_effect が `apply_locale` を上書きする。
+    apply_locale(detect_default_locale());
     match Config::load() {
         Ok(config) => {
             let workspace_dir = config.workspace_dir().clone();
@@ -30,12 +36,15 @@ pub fn AppRoot() -> Element {
                 AppMain { workspace_dir }
             }
         }
-        Err(e) => rsx! {
-            div {
-                h1 { "起動エラー" }
-                p { "設定の読み込みに失敗しました: {e}" }
+        Err(e) => {
+            let message = translate_args("app.startup_error_message", &[("error", &e.to_string())]);
+            rsx! {
+                div {
+                    h1 { "{translate(\"app.startup_error_title\")}" }
+                    p { "{message}" }
+                }
             }
-        },
+        }
     }
 }
 
@@ -113,6 +122,11 @@ fn AppMain(workspace_dir: PathBuf) -> Element {
         ));
     });
 
+    // locale を Signal に追従させて rust_i18n の thread-local を更新する (ADR-0042)。
+    use_effect(move || {
+        apply_locale(preferences.read().locale);
+    });
+
     rsx! {
         document::Stylesheet { href: asset!("/assets/tailwind.css") }
 
@@ -121,7 +135,7 @@ fn AppMain(workspace_dir: PathBuf) -> Element {
                 rsx! {
                     div { class: "flex items-center justify-center min-h-screen",
                         div { role: "alert", class: "alert alert-error max-w-lg",
-                            span { "予期しないエラーが発生しました" }
+                            span { "{translate(\"app.unexpected_error\")}" }
                             if let Some(error) = errors.error() {
                                 p { class: "text-sm opacity-80", "{error}" }
                             }

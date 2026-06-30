@@ -5,6 +5,7 @@ pub mod config;
 pub mod flip;
 pub mod png_header;
 pub mod projection;
+pub mod settings;
 
 mod input;
 pub use input::{

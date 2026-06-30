@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted (2026-06-28 追記: `bebeu-engine.yml` の `window: {width, height}` セクションを
+ADR-0041 で Bevy App Settings に移管したため、本 ADR の対象から除外。
+`bebeu-engine.yml` は `workspace_dir` のみを持つ最小 config に縮小された)
 
 > 注: 本リポジトリ (`Bebeu`) では engine は Rust + Bevy で実装する。本 ADR の
 > 「engine 起動時にエンジン固有の config を読みつつ、editor 編集の workspace data も読む」

@@ -3,29 +3,27 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 
 use crate::entities::preference::{
-    Preferences, PreferencesRepository, Theme, use_preferences, use_t, use_t_args,
+    Locale, Preferences, PreferencesRepository, use_preferences, use_t, use_t_args,
 };
 
-const THEMES: &[(Theme, &str)] = &[(Theme::Emerald, "Emerald (light)"), (Theme::Dark, "Dark")];
-
 #[component]
-pub fn ChangeThemeSelect() -> Element {
+pub fn ChangeLocaleSelect() -> Element {
     let repo = use_context::<Arc<dyn PreferencesRepository>>();
     let mut preferences = use_preferences();
     let mut error = use_signal(|| None::<String>);
     let t = use_t();
     let t_args = use_t_args();
 
-    let current = preferences.read().theme;
+    let current = preferences.read().locale;
 
     let on_change = move |evt: Event<FormData>| {
         let value = evt.value();
-        let new_theme = match value.as_str() {
-            "emerald" => Theme::Emerald,
-            "dark" => Theme::Dark,
+        let new_locale = match value.as_str() {
+            "ja" => Locale::Ja,
+            "en" => Locale::En,
             other => {
                 error.set(Some(t_args(
-                    "preferences.theme_unknown",
+                    "preferences.locale_unknown",
                     &[("value", other)],
                 )));
                 return;
@@ -33,10 +31,10 @@ pub fn ChangeThemeSelect() -> Element {
         };
 
         let new_prefs = Preferences {
-            theme: new_theme,
+            locale: new_locale,
             ..preferences.peek().clone()
         };
-        // disk 保存に成功してから signal を更新（disk と memory の乖離を避ける）
+        // disk 保存に成功してから signal を更新 (change_theme.rs と同じ pattern: ADR-0012)
         match repo.save(&new_prefs) {
             Ok(()) => {
                 preferences.set(new_prefs);
@@ -48,14 +46,14 @@ pub fn ChangeThemeSelect() -> Element {
 
     rsx! {
         fieldset { class: "fieldset",
-            legend { class: "fieldset-legend", "{t(\"preferences.theme\")}" }
+            legend { class: "fieldset-legend", "{t(\"preferences.locale\")}" }
             select { class: "select select-bordered w-full", onchange: on_change,
-                for (theme, label) in THEMES {
+                for locale in Locale::all() {
                     option {
-                        key: "{theme.as_str()}",
-                        value: "{theme.as_str()}",
-                        selected: *theme == current,
-                        "{label}"
+                        key: "{locale.as_str()}",
+                        value: "{locale.as_str()}",
+                        selected: *locale == current,
+                        "{t(locale_label_key(*locale))}"
                     }
                 }
             }
@@ -63,5 +61,12 @@ pub fn ChangeThemeSelect() -> Element {
                 p { class: "text-error text-xs mt-1", "{message}" }
             }
         }
+    }
+}
+
+fn locale_label_key(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Ja => "preferences.locale_ja",
+        Locale::En => "preferences.locale_en",
     }
 }

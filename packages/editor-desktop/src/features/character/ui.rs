@@ -19,6 +19,12 @@ pub use edit_physics_inline::{
     EditPhysicsF32Inline, EditPhysicsU32Inline, PhysicsF32Field, PhysicsU32Field,
 };
 
+mod edit_ai_inline;
+pub use edit_ai_inline::{
+    AiF32Field, AiU32Field, EditAiF32Inline, EditAiKindInline, EditAiSelectorInline,
+    EditAiU32Inline,
+};
+
 mod change_thumbnail;
 pub use change_thumbnail::ChangeThumbnailButton;
 

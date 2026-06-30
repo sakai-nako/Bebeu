@@ -30,10 +30,17 @@ impl Theme {
     }
 }
 
+pub use crate::shared::Locale;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preferences {
     #[serde(default)]
     pub theme: Theme,
+    /// editor UI の表示言語。`#[serde(default)]` は `Locale::default()` (= Ja) で補完する。
+    /// 既存ユーザー (preferences.yml あり) は日本語のまま、初回起動時 (ファイル不在) は
+    /// `FilesystemPreferencesRepository::load` 経由で OS locale 検出が走る (ADR-0042)。
+    #[serde(default)]
+    pub locale: Locale,
     #[serde(default)]
     pub view_controls: ViewControlBindings,
     #[serde(default)]
@@ -66,6 +73,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             theme: Theme::default(),
+            locale: Locale::default(),
             view_controls: ViewControlBindings::default(),
             key_bindings: KeyBindings::default(),
             sprite_group_history_capacity: DEFAULT_SPRITE_GROUP_HISTORY_CAPACITY,

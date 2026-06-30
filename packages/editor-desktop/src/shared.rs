@@ -30,6 +30,9 @@ pub use image_cache_buster::{
 mod toast;
 pub use toast::{ToastHost, ToastKind, UseToast, use_toast, use_toast_provider};
 
+mod i18n;
+pub use i18n::{Locale, apply_locale, detect_default_locale, translate, translate_args};
+
 mod wav_header;
 pub use wav_header::{WavInfo, parse_wav_info, read_wav_info};
 

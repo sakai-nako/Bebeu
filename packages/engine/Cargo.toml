@@ -17,7 +17,7 @@ serde.workspace = true
 serde-saphyr.workspace = true
 tracing.workspace = true
 
-bevy = { version = "0.19", features = ["wav"] }
+bevy = { version = "0.19", features = ["wav", "bevy_settings"] }
 # SoundGroup.pick の重み付き乱選で使う (ADR-0019)。
 # 簡易乱数で十分なので thread_rng + Uniform レベル機能のみ使う。
 rand = "0.9"

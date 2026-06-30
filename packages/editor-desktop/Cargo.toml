@@ -14,8 +14,10 @@ dirs = "6.0.0"
 http = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.17.2"
+rust-i18n = "4.1"
 serde.workspace = true
 serde-saphyr.workspace = true
+sys-locale = "0.3"
 tracing.workspace = true
 xcap = "0.9"
 

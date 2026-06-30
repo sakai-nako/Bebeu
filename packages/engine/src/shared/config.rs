@@ -1,7 +1,8 @@
 //! Engine の runtime ディレクトリ解決と起動時 config (`bebeu-engine.yml`)。
 //!
 //! `bebeu-engine.yml` は **engine が起動時に 1 度だけ読む config**。`workspace_dir`
-//! と `window` を持つ (ADR-0016 が言う「engine 専用 config」)。
+//! のみを持つ (ADR-0016 が言う「engine 専用 config」、ただし window 関連は ADR-0041 で
+//! Bevy App Settings に移管したため本 yml からは外れた)。
 //!
 //! 解決優先順:
 //! - `workspace_dir`: env `BEATEMUP_RUNTIME_DIR` > yml `workspace_dir` >
@@ -126,22 +127,15 @@ impl RuntimePaths {
     }
 }
 
-/// `bebeu-engine.yml` で指定できる window pixel サイズ。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct WindowConfig {
-    pub width: u32,
-    pub height: u32,
-}
-
 /// `bebeu-engine.yml` の内容。
 ///
 /// 未指定フィールドは `None` のまま (entrypoint 側で fallback を当てる)。
+/// window 関連は ADR-0041 で App Settings (`shared/settings.rs::WindowSettings`) に
+/// 移管したためここからは外れている。
 #[derive(Resource, Debug, Clone, Default, Deserialize)]
 pub struct EngineConfig {
     #[serde(default)]
     pub workspace_dir: Option<PathBuf>,
-    #[serde(default)]
-    pub window: Option<WindowConfig>,
 }
 
 impl EngineConfig {
@@ -273,7 +267,6 @@ mod tests {
         let yml_root = PathBuf::from("from").join("yml");
         let cfg = EngineConfig {
             workspace_dir: Some(yml_root.clone()),
-            window: None,
         };
         // env を unset した状態を期待 (CI / 通常 dev で BEATEMUP_RUNTIME_DIR は立たない想定)。
         if std::env::var_os("BEATEMUP_RUNTIME_DIR").is_some() {
@@ -287,20 +280,6 @@ mod tests {
     fn engine_config_default_is_all_none() {
         let cfg = EngineConfig::default();
         assert!(cfg.workspace_dir.is_none());
-        assert!(cfg.window.is_none());
-    }
-
-    #[test]
-    fn engine_config_parses_window_block() {
-        let yaml = "window:\n  width: 1280\n  height: 720\n";
-        let cfg: EngineConfig = serde_saphyr::from_str(yaml).expect("parse");
-        assert_eq!(
-            cfg.window,
-            Some(WindowConfig {
-                width: 1280,
-                height: 720
-            })
-        );
     }
 
     #[test]
@@ -314,6 +293,5 @@ mod tests {
     fn engine_config_empty_yaml_uses_defaults() {
         let cfg: EngineConfig = serde_saphyr::from_str("{}\n").expect("parse");
         assert!(cfg.workspace_dir.is_none());
-        assert!(cfg.window.is_none());
     }
 }

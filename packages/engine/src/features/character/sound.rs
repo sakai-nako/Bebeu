@@ -38,6 +38,7 @@ use bevy::prelude::*;
 use rand::Rng;
 
 use crate::entities::character::{Character, FrameSound, SoundGroup};
+use crate::shared::settings::AudioSettings;
 
 use super::animation::{AnimationFrames, AnimationSet, VSYNC_TICK};
 use super::attack::AttackSet;
@@ -221,6 +222,7 @@ fn track_animation_swap(
 /// (= ADR-0034 の `on_hit` / `on_guard` 仕組みは使われず `number` だけが選ばれる)。
 fn tick_sound_dispatch(
     mut commands: Commands,
+    audio_settings: Res<AudioSettings>,
     mut query: Query<
         (
             &AnimationFrames,
@@ -251,10 +253,11 @@ fn tick_sound_dispatch(
             tracing::warn!(number, "sound dispatch: SoundGroup is empty");
             continue;
         };
+        // ADR-0041 — 個別 sound の volume に master gain を掛ける。
         commands.spawn((
             AudioPlayer::new(picked.handle.clone()),
             PlaybackSettings {
-                volume: Volume::Linear(picked.volume),
+                volume: Volume::Linear(picked.volume * audio_settings.master_volume),
                 ..PlaybackSettings::DESPAWN
             },
         ));
